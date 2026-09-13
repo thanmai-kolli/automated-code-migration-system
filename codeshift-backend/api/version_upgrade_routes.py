@@ -26,7 +26,8 @@ def version_upgrade():
 
         result = run_version_upgrade_api(
             code=code,
-            language=language
+            language=language,
+            test_cases=data.get("test_cases")
         )
 
         if "error" in result:

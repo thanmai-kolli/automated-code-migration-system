@@ -176,6 +176,20 @@
   font-weight: 600;
 }
 
+.test-hint {
+  margin: -8px 0 14px;
+  font-size: 13px;
+  color: #7d8fa0;
+}
+
+.test-hint code {
+  background: rgba(0, 217, 255, 0.08);
+  color: #00d9ff;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-family: "Fira Code", monospace;
+}
+
 .test-area {
   width: 100%;
   background: #081a28;
@@ -493,6 +507,18 @@
 .test-details {
   margin-top: 8px;
   font-size: 14px;
+}
+
+.test-failures {
+  margin: 12px 0 0;
+  padding-left: 18px;
+  font-size: 13px;
+  color: #ff8a8a;
+  line-height: 1.6;
+}
+
+.test-failures strong {
+  color: #ffb4b4;
 }
 
 /* Risk Triggers */

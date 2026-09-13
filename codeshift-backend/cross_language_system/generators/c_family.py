@@ -109,7 +109,7 @@ class CFamilyGenerator:
             if not isinstance(n, (Class, Function))
         ]
 
-        body = self.headers(program)
+        body = ""
 
         for cls in classes:
             body += self.render_class(cls)
@@ -129,9 +129,10 @@ class CFamilyGenerator:
             body += self.statement(stmt, 1)
         body += "    return 0;\n}\n"
 
-        return body
+        # Headers come last so they can react to what the body actually needs.
+        return self.headers(program, body) + body
 
-    def headers(self, program):
+    def headers(self, program, body):
         raise NotImplementedError
 
     # ------------------------------------------------------------
@@ -179,8 +180,17 @@ class CFamilyGenerator:
             return f"{self.expr(node.obj)}[{self.expr(node.index)}]"
 
         if isinstance(node, TypeCast):
+            inner = self.expr(node.value)
+
+            # Parsing a string needs a conversion function, not a cast.
+            if self._expr_type(node.value) in ("string", "char*"):
+                if node.target_type == "int":
+                    return f"stoi({inner})" if self.cpp else f"atoi({inner})"
+                if node.target_type == "float":
+                    return f"stod({inner})" if self.cpp else f"atof({inner})"
+
             target = {"int": "int", "float": "double", "bool": "bool"}.get(node.target_type)
-            return f"({target}) {self.expr(node.value)}" if target else self.expr(node.value)
+            return f"({target}) {inner}" if target else inner
 
         if isinstance(node, ObjectCreation):
             args = ", ".join(self.expr(a) for a in (node.arguments or []))
@@ -193,6 +203,12 @@ class CFamilyGenerator:
         if isinstance(node, MethodCall):
             return self.method_call(node)
 
+        if isinstance(node, Input):
+            if self.cpp:
+                # An immediately-invoked lambda lets a read work as an expression.
+                return "[]{ string _line; getline(cin, _line); return _line; }()"
+            return "NULL"
+
         if isinstance(node, ArrayLiteral):
             elements = ", ".join(self.expr(e) for e in node.elements)
             return "{" + elements + "}"
@@ -204,6 +220,23 @@ class CFamilyGenerator:
             return self.expr(node.args[-1]) if node.args else "0"
 
         return "0"
+
+    def _expr_type(self, node):
+        """Best-effort static type, used only to pick a conversion form."""
+
+        if isinstance(node, Identifier):
+            return self.scope.get(node.name)
+        if isinstance(node, Constant) and isinstance(node.value, str):
+            return "string" if self.cpp else "char*"
+        if isinstance(node, MethodCall) and node.method == "split":
+            return "vector<string>"
+        if isinstance(node, Input):
+            return "string" if self.cpp else "char*"
+        if isinstance(node, IndexAccess):
+            container = self._expr_type(node.obj)
+            if container and "string" in container:
+                return "string" if self.cpp else "char*"
+        return None
 
     def constant(self, value):
         if value is None:

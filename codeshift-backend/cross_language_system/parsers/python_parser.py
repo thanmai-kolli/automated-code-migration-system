@@ -4,6 +4,9 @@ from cross_language_system.core.ir_nodes import *
 
 class PythonParser:
 
+    def __init__(self):
+        self._temp_index = 0
+
     def parse(self, code):
         tree = ast.parse(code)
         return self._build_ir(tree)
@@ -24,9 +27,8 @@ class PythonParser:
                 continue
 
             else:
-                stmt = self._handle_statement(node)
-                if stmt is not None:
-                    body.append(stmt)
+                # Tuple unpacking expands into several statements.
+                body.extend(self._handle_body([node]))
 
         return Program(body)
 
@@ -279,19 +281,32 @@ class PythonParser:
 
             # a, b = 1, 2
             if isinstance(target_node, (ast.Tuple, ast.List)):
-                values = (
+
+                literal = (
                     node.value.elts
                     if isinstance(node.value, (ast.Tuple, ast.List))
                     and len(node.value.elts) == len(target_node.elts)
                     else None
                 )
 
+                if literal:
+                    for index, element in enumerate(target_node.elts):
+                        statements.append(
+                            self._assign_to(element, self._handle_expr(literal[index]))
+                        )
+                    continue
+
+                # Anything else must be evaluated once, or side effects such as
+                # input() would run per unpacked name.
+                self._temp_index += 1
+                temp = f"_unpacked{self._temp_index}"
+                statements.append(Variable(temp, value=value))
+
                 for index, element in enumerate(target_node.elts):
-                    element_value = (
-                        self._handle_expr(values[index]) if values
-                        else IndexAccess(value, Constant(index))
-                    )
-                    statements.append(self._assign_to(element, element_value))
+                    statements.append(self._assign_to(
+                        element,
+                        IndexAccess(Identifier(temp), Constant(index)),
+                    ))
                 continue
 
             statements.append(self._assign_to(target_node, value))

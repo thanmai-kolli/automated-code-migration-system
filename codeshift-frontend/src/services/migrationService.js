@@ -23,18 +23,20 @@ function normalizeReport(data) {
     diffText: data.diff_text ?? "",
 
     semanticIssues: data.semantic_issues ?? [],
+    testResults: data.test_results ?? null,
     timeTakenMs: data.timeTakenMs ?? data.time_taken_ms ?? null
   };
 }
 
-export async function runCrossLanguage(code, source, target) {
+export async function runCrossLanguage(code, source, target, testCases) {
   const res = await fetch(`${API_BASE}/cross-language`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       code,
       source_language: source.toLowerCase(),
-      target_language: target.toLowerCase()
+      target_language: target.toLowerCase(),
+      test_cases: testCases || null
     })
   });
 
@@ -47,13 +49,14 @@ export async function runCrossLanguage(code, source, target) {
   };
 }
 
-export async function runVersionUpgrade(code, language) {
+export async function runVersionUpgrade(code, language, testCases) {
   const res = await fetch(`${API_BASE}/version-upgrade`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       code,
-      language: language.toLowerCase()
+      language: language.toLowerCase(),
+      test_cases: testCases || null
     })
   });
 

@@ -457,6 +457,8 @@ class TypeAnnotator:
         if isinstance(expr, MethodCall):
             if expr.method == "size":
                 return "int"
+            if expr.method == "split":
+                return "List<String>"
             if expr.method in ("keys", "values"):
                 return "List<Object>"
             return UNKNOWN

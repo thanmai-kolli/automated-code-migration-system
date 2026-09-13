@@ -23,7 +23,8 @@ class CValidator:
             result = subprocess.run(
                 [compiler, "-std=c17", file_path],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=20
             )
 
             os.remove(file_path)

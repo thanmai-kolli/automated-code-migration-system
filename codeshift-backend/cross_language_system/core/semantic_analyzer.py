@@ -1,5 +1,16 @@
 class SemanticAnalyzer:
 
+    # Everything the generators can place inside the target's entry point.
+    SUPPORTED_TOP_LEVEL = {
+        "Function", "Class", "Variable", "Assignment", "AugAssign",
+        "PrintStatement", "IfStatement", "ForLoop", "WhileLoop", "TryCatch",
+        "Break", "Continue", "Pass", "Return",
+        "FunctionCall", "MethodCall", "ListAppend", "DictPut",
+    }
+
+    # Nodes no generator lowers into C-family targets yet.
+    UNSUPPORTED_IN_C_FAMILY = {"SwitchStatement"}
+
     def analyze(self, program, source, target):
 
         issues = []
@@ -15,11 +26,14 @@ class SemanticAnalyzer:
         if source == "python" and target == "cpp":
             issues.append("Smart pointer ownership required")
 
-        # Unsupported feature detection placeholder
         for node in getattr(program, "body", []):
-            if node.__class__.__name__ not in [
-                "Function", "Class"
-            ]:
-                issues.append("Unsupported top-level construct detected")
+
+            name = node.__class__.__name__
+
+            if name not in self.SUPPORTED_TOP_LEVEL:
+                issues.append(f"Unsupported top-level construct: {name}")
+
+            elif name in self.UNSUPPORTED_IN_C_FAMILY and target in ("c", "cpp", "c++"):
+                issues.append(f"{name} is not lowered into {target} yet")
 
         return issues

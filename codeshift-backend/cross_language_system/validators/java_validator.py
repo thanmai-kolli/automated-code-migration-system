@@ -21,7 +21,8 @@ class JavaValidator:
             result = subprocess.run(
                 ["javac", file_path],
                 capture_output=True,
-                text=True
+                text=True,
+                timeout=20
             )
 
             # Clean up

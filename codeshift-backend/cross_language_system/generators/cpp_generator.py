@@ -22,11 +22,35 @@ class CppGenerator(CFamilyGenerator):
     # IR PATH
     # -----------------------------------------
 
-    def headers(self, program):
+    def headers(self, program, body):
 
         code = "#include <iostream>\n#include <string>\n#include <vector>\n#include <map>\n"
+
+        if "_split(" in body:
+            code += "#include <sstream>\n"
+
         code += "using namespace std;\n\n"
+
+        if "_split(" in body:
+            code += (
+                "vector<string> _split(const string& text) {\n"
+                "    vector<string> parts;\n"
+                "    istringstream stream(text);\n"
+                "    string token;\n"
+                "    while (stream >> token) parts.push_back(token);\n"
+                "    return parts;\n"
+                "}\n\n"
+            )
+
         return code
+
+    def method_call(self, node):
+
+        # C++ has no string::split, so the generator supplies one.
+        if node.method == "split" and not node.args:
+            return f"_split({self.expr(node.obj)})"
+
+        return super().method_call(node)
 
     def interpolation(self, node):
 

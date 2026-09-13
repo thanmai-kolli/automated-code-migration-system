@@ -202,15 +202,43 @@ const confidencePercent =
         {report.testResults && (
           <div className="report-box">
             <h4>Test Execution Summary</h4>
-            <div className="test-summary">
-              {report.testResults.passed} / {report.testResults.total}
-            </div>
-            <div className="test-details">
-              Failed: {report.testResults.failed}
-            </div>
-            <p className="report-description">
-              Validates functional correctness using provided test cases.
-            </p>
+
+            {report.testResults.enabled === false ? (
+              <>
+                <div className="test-summary">Not run</div>
+                <p className="report-description">{report.testResults.reason}</p>
+              </>
+            ) : (
+              <>
+                <div className="test-summary">
+                  {report.testResults.passed} / {report.testResults.total}
+                </div>
+                <div className="test-details">
+                  Failed: {report.testResults.failed}
+                </div>
+
+                {report.testResults.cases?.some((c) => !c.passed) && (
+                  <ul className="test-failures">
+                    {report.testResults.cases
+                      .filter((c) => !c.passed)
+                      .map((c) => (
+                        <li key={c.index}>
+                          <strong>Case {c.index}</strong>
+                          {c.error
+                            ? ` — ${c.error}`
+                            : ` — expected ${JSON.stringify(
+                                c.expected ?? c.source_output
+                              )}, got ${JSON.stringify(c.target_output)}`}
+                        </li>
+                      ))}
+                  </ul>
+                )}
+
+                <p className="report-description">
+                  Runs both programs on your inputs and compares their output.
+                </p>
+              </>
+            )}
           </div>
         )}
       </div>

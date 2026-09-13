@@ -629,6 +629,14 @@ class JavaGenerator:
 
             args = ", ".join(self._generate_expr(a) for a in expr.args)
 
+            # Python's bare split() tokenises on any whitespace; wrapping the
+            # resulting String[] keeps it indexable like every other list.
+            if expr.method == "split" and not expr.args:
+                return (
+                    f'Arrays.asList({self._generate_expr(expr.obj)}'
+                    f'.trim().split("\\\\s+"))'
+                )
+
             if expr.method == "remove":
 
                 arg = self._generate_expr(expr.args[0])

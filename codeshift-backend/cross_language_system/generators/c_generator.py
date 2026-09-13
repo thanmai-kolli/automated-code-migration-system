@@ -71,7 +71,7 @@ class CGenerator(CFamilyGenerator):
     # IR PATH
     # -----------------------------------------
 
-    def headers(self, program):
+    def headers(self, program, body):
         return "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n"
 
     def interpolation(self, node):

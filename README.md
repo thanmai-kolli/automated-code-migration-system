@@ -129,6 +129,8 @@ That's it — Vite proxies `/api` to Flask, so no CORS setup is needed in develo
 | `HOST` / `PORT` | backend | `127.0.0.1` / `5000` | bind address |
 | `FLASK_DEBUG` | backend | `0` | set `1` for auto-reload |
 | `CORS_ORIGINS` | backend | `http://localhost:5173,http://127.0.0.1:5173` | allowed origins when *not* using the Vite proxy |
+| `CODESHIFT_ENABLE_TEST_EXECUTION` | backend | `0` | set `1` to run test cases — **executes submitted code locally** |
+| `CODESHIFT_TEST_TIMEOUT` | backend | `5` | per-run timeout in seconds |
 | `VITE_API_PROXY_TARGET` | frontend | `http://127.0.0.1:5000` | where the dev proxy points |
 | `VITE_API_BASE_URL` | frontend | `/api` | absolute API origin for production builds |
 
@@ -178,17 +180,55 @@ Copy `codeshift-frontend/.env.example` to `.env` to override.
 
 ---
 
+## Behavioural test validation
+
+Compiling proves the output is *valid*. Running it proves the output is *correct*.
+Both endpoints accept an optional `test_cases` string; the engine then compiles and
+runs **both** the original and the migrated program against the same stdin and compares
+their stdout.
+
+```
+2 3
+===
+5
+---
+10 20
+===
+30
+```
+
+Cases are separated by `---`, input and expected output by `===`. The `===` half is
+optional — without it the migration is compared against the original program, so a
+behavioural regression is caught with no expected output written at all.
+
+```jsonc
+"test_results": {
+  "enabled": true, "total": 2, "passed": 2, "failed": 0,
+  "cases": [{ "index": 1, "input": "2 3", "expected": "5",
+              "source_output": "5\n", "target_output": "5\n",
+              "compared_against": "expected output", "passed": true }]
+}
+```
+
+> **This executes submitted source code**, so it is off unless you set
+> `CODESHIFT_ENABLE_TEST_EXECUTION=1`. Runs are capped at 5 s and 20 cases, use a
+> throwaway working directory and a minimal environment, but they are **not** a
+> sandbox — enable this only for local use, never on a shared or public host.
+
+---
+
 ## Tests
 
 ```bash
 cd codeshift-backend
 pip install pytest
-python -m pytest -q          # 98 tests
+python -m pytest -q          # 120 tests
 ```
 
 Covers the Python version detector, the AST validator, every Python 2 → 3 rule,
 indentation-preserving upgrades, diff/change counting, the language registry,
-similarity scoring, every API route including the 1 MB payload limit, plus conversion
+similarity scoring, every API route including the 1 MB payload limit, the test executor
+(parsing, the opt-in gate, timeouts, cleanup, cross-language runs), plus conversion
 fidelity: parser coverage, type inference, generated-code content, and a compile check
 on all 12 language pairs.
 
@@ -218,6 +258,11 @@ Both suites run on every push and pull request — see [ci.yml](.github/workflow
 **Version upgrade** — Python 2 detected, `print` statements modernised, output validated.
 
 ![Python 2 to 3 upgrade result](docs/screenshots/09-version-upgrade-result.png)
+
+**Behavioural test validation** — both programs run on your inputs; the third case here
+deliberately expects the wrong answer, and is caught.
+
+![Test execution summary](docs/screenshots/10-test-execution.png)
 
 <details>
 <summary>More of the landing page</summary>
@@ -302,4 +347,5 @@ codeshift-frontend/src/
   `long`, `<>`, `has_key` and comma-style `except` clauses; every applied rule is
   listed in the report's risk triggers, and a rewrite that fails to parse is discarded
   in favour of the original.
-- `test_success` currently mirrors syntax validation; the test-case panel is scaffolding.
+- `test_success` currently mirrors syntax validation unless test cases are supplied and
+  `CODESHIFT_ENABLE_TEST_EXECUTION=1`, in which case it reflects real execution.

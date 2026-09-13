@@ -33,12 +33,14 @@ export default function WorkspaceStep({ mode, config, onBack }) {
         result = await runCrossLanguage(
           inputCode,
           config.sourceLang,
-          config.targetLang
+          config.targetLang,
+          testCases
         );
       } else {
         result = await runVersionUpgrade(
           inputCode,
-          config.sourceLang
+          config.sourceLang,
+          testCases
         );
       }
 

@@ -30,7 +30,8 @@ def cross_language():
         result = run_cross_language_api(
             code=code,
             source=source,
-            target=target
+            target=target,
+            test_cases=data.get("test_cases")
         )
 
         if result is None:

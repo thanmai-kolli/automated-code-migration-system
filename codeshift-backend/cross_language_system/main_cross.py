@@ -10,6 +10,7 @@ from cross_language_system.core.structure_similarity import compute_structure_si
 from cross_language_system.core.ast_similarity import compute_ast_similarity
 from cross_language_system.core.confidence_engine import ConfidenceEngine
 from cross_language_system.core.accuracy_engine import AccuracyEngine
+from cross_language_system.core.test_executor import run_test_cases
 # ------------------------------------------------------------
 # Read Multi-line Input
 # ------------------------------------------------------------
@@ -83,7 +84,7 @@ if __name__ == "__main__":
 # ------------------------------------------------------------
 # API ENTRY (For Flask)
 # ------------------------------------------------------------
-def run_cross_language_api(code, source=None, target=None):
+def run_cross_language_api(code, source=None, target=None, test_cases=None):
 
     engine = CrossLanguageEngine()
 
@@ -128,6 +129,14 @@ def run_cross_language_api(code, source=None, target=None):
 
         result["confidence"] = confidence_engine.predict(features)
         result["accuracy"] = round(accuracy_engine.predict(features),2)
+
+        test_results = run_test_cases(
+            source, code, target, result.get("code", ""), test_cases
+        )
+        if test_results:
+            result["test_results"] = test_results
+            if test_results.get("enabled"):
+                result["test_success"] = test_results["failed"] == 0
 
         end_time = time.perf_counter()
 
