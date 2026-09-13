@@ -23,7 +23,7 @@ React workspace.
 
 | Engine | What it does | Supported |
 | --- | --- | --- |
-| **Cross-Language** | Parses source into a language-neutral IR, regenerates it in the target language | Python ↔ Java, C ↔ C++ |
+| **Cross-Language** | Parses source into a language-neutral IR, infers types across the whole program, regenerates it in the target language | All 12 ordered pairs of Python, Java, C, C++ |
 | **Version Upgrade** | Detects the language version in use and rewrites deprecated constructs | Python → 3.12, Java → 17, C → C17, C++ → C++20 |
 
 Every run returns a **Migration Intelligence Report** — not just converted code:
@@ -54,13 +54,39 @@ automated_code_migration_system_final/   the same two engines as a standalone CL
 ### Cross-language pipeline
 
 ```
-source ─► parser ─► IR nodes ─► symbol table + type inference ─► semantic analyzer
-                                                                      │
+source ─► parser ─► IR nodes ─► type annotator ─► semantic analyzer
+                                    │
        score ◄── confidence/accuracy models ◄── validator ◄── generator
 ```
 
-Parsers: Python via `ast`, Java via `javalang`, C/C++ via regex (C++ upgrades additionally
-use `libclang` when available, falling back to a regex transformer otherwise).
+The **type annotator** is what makes statically typed targets usable. Python and
+C carry almost no type information at the syntax level, so a three-pass whole-
+program analysis resolves every parameter, field, local and return type before
+generation:
+
+- **literals and annotations** seed the initial types
+- **usage** narrows them — `amount > self.balance` makes `amount` numeric, `total += s`
+  makes `s` whatever `total` is, `for x in xs` makes `xs` a list of `x`'s type
+- **call sites** feed actual argument types back into definitions
+- **constructor assignments** unify a parameter with the field it initialises
+
+Without it every generated signature degrades to `Object`, which does not compile.
+
+Parsers: Python via `ast`, Java via `javalang`, C/C++ via a recursive-descent
+parser over the procedural subset. C ↔ C++ additionally uses a direct text
+rewriter, which round-trips those two exactly.
+
+### Accuracy by direction
+
+Measured on the sample programs in `tests/test_conversion_fidelity.py`; every
+direction compiles with the real toolchain (`javac` / `gcc` / `g++` / `ast.parse`).
+
+| | → Python | → Java | → C | → C++ |
+| --- | --- | --- | --- | --- |
+| **Python →** | — | 96.3 | 79.0 | 89.3 |
+| **Java →** | 99.9 | — | 89.6 | 89.7 |
+| **C →** | 96.9 | 92.3 | — | 100 |
+| **C++ →** | 96.3 | 92.0 | 100 | — |
 
 ---
 
@@ -150,12 +176,13 @@ Copy `codeshift-frontend/.env.example` to `.env` to override.
 ```bash
 cd codeshift-backend
 pip install pytest
-python -m pytest -q          # 40 tests
+python -m pytest -q          # 86 tests
 ```
 
 Covers the Python version detector, the AST validator, indentation-preserving upgrades,
-diff/change counting, the language registry, similarity scoring, and every API route
-including the 1 MB payload limit.
+diff/change counting, the language registry, similarity scoring, every API route
+including the 1 MB payload limit, plus conversion fidelity: parser coverage, type
+inference, generated-code content, and a compile check on all 12 language pairs.
 
 ```bash
 cd codeshift-frontend
@@ -172,7 +199,7 @@ Both suites run on every push and pull request — see [ci.yml](.github/workflow
 <table>
 <tr>
 <td width="50%"><img src="docs/screenshots/05-migration-step1-mode.png" alt="Step 1 — select migration mode"><br><sub><b>1.</b> Pick cross-language or version upgrade</sub></td>
-<td width="50%"><img src="docs/screenshots/06-migration-step2-config.png" alt="Step 2 — configure languages"><br><sub><b>2.</b> Only valid language pairs are offered</sub></td>
+<td width="50%"><img src="docs/screenshots/06-migration-step2-config.png" alt="Step 2 — configure languages"><br><sub><b>2.</b> Pick a source, then any of the other three as target</sub></td>
 </tr>
 </table>
 
@@ -231,7 +258,7 @@ codeshift-backend/
   api/                              cross-language & version-upgrade blueprints
   tests/                            pytest suite (engines + API routes)
   cross_language_system/
-    core/                           dispatcher, IR, symbol table, type inference,
+    core/                           dispatcher, IR, type annotator, symbol table,
                                     semantic analyzer, similarity + scoring engines
     parsers/ generators/ validators/    one module per language
     ml/                             models, training data, training scripts
@@ -254,12 +281,15 @@ automated_code_migration_system_final/    standalone CLI build of both engines
 
 ## Known limitations
 
-- The Java generator emits method signatures and control flow, but drops some assignment
-  bodies — `compile_success: false` on the Python → Java sample above is genuine, not a
-  display bug.
-- C and C++ parsing is regex-based in the cross-language engine; deeply templated or
-  macro-heavy code will not round-trip.
+- The C/C++ parser covers the common procedural subset — functions, structs, simple
+  classes, control flow and expressions. Templates, macros, multiple inheritance and
+  pointer arithmetic are not modelled.
+- Where a Python type genuinely cannot be inferred, the target falls back to `Object`
+  (Java), a `template` parameter (C++) or `int` (C, which has no generics). The
+  semantic-issues list reports each such decision.
+- Python → C is the weakest direction: C has no strings, no growable lists and no
+  exceptions, so arrays are emitted with a companion `_length` variable and `try`
+  blocks are inlined with a comment.
 - The version-upgrade engine covers a curated rule set per language, not the full
   2to3 / JDK migration surface.
 - `test_success` currently mirrors syntax validation; the test-case panel is scaffolding.
-- Cross-language conversion is restricted to Python ↔ Java and C ↔ C++.

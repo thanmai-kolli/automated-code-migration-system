@@ -17,20 +17,33 @@ class PythonGenerator:
     def generate(self, program):
 
         self.symbol_table = SymbolTable()
-        code = ""
-
-        class_name = None
+        blocks = []
+        main_statements = []
+        entry_class = None
 
         for node in program.body:
+
             if isinstance(node, Class):
-                class_name = node.name
-                code += self._generate_node(node)
+                blocks.append(self._generate_class(node))
+                if any(m.name == "main" for m in node.methods):
+                    entry_class = node.name
 
-        if class_name:
-            code += "\nif __name__ == '__main__':\n"
-            code += f"    {class_name}.main([])\n"
+            elif isinstance(node, Function):
+                blocks.append(self._generate_function(node))
 
-        return code
+            else:
+                main_statements.append(node)
+
+        code = "\n".join(b for b in blocks if b.strip())
+
+        if main_statements:
+            body = "".join(self._generate_statement(s, 1) for s in main_statements)
+            code += "\n\nif __name__ == '__main__':\n" + (body or "    pass\n")
+
+        elif entry_class:
+            code += f"\n\nif __name__ == '__main__':\n    {entry_class}.main([])\n"
+
+        return code or "pass\n"
 
     def _generate_node(self, node):
 
@@ -44,39 +57,90 @@ class PythonGenerator:
 
     def _generate_class(self, cls):
 
-        code = f"class {cls.name}:\n"
+        header = f"class {cls.name}({cls.base}):\n" if cls.base else f"class {cls.name}:\n"
+        code = header
 
         if not cls.methods:
-            code += "    pass\n"
-            return code
+            # Fields alone still need a constructor to be meaningful.
+            if cls.fields:
+                code += "    def __init__(self):\n"
+                for field in cls.fields:
+                    default = self._generate_expr(field.value) if field.value else self._default_for(field.field_type)
+                    code += f"        self.{field.name} = {default}\n"
+                return code + "\n"
+            return code + "    pass\n\n"
 
         for method in cls.methods:
-            code += self._generate_function(method, indent=1)
+            code += self._generate_function(method, indent=1, owner=cls)
 
-        return code + "\n"
+        return code
 
-    def _generate_function(self, func, indent=0):
+    def _default_for(self, field_type):
+        return {
+            "int": "0",
+            "double": "0.0",
+            "float": "0.0",
+            "boolean": "False",
+            "bool": "False",
+            "String": '""',
+            "str": '""',
+        }.get(field_type, "None")
+
+    def _generate_function(self, func, indent=0, owner=None):
 
         tab = "    " * indent
-        params = ", ".join(func.params)
+        name = "__init__" if func.is_constructor else func.name
 
-        if func.name == "main":
-            code = f"{tab}@staticmethod\n"
-            code += f"{tab}def {func.name}({params}):\n"
+        if owner and not func.is_static:
+            params = ", ".join(["self"] + list(func.params))
+        elif owner:
+            params = ", ".join(func.params)
         else:
-            code = f"{tab}def {func.name}({params}):\n"
+            params = ", ".join(func.params)
 
-        if not func.body:
-            return code + f"{tab}    pass\n"
+        code = ""
+        if owner and func.is_static and not func.is_constructor:
+            code += f"{tab}@staticmethod\n"
 
-        for stmt in func.body:
-            code += self._generate_statement(stmt, indent + 1)
+        code += f"{tab}def {name}({params}):\n"
 
-        return code + "\n"
+        body = "".join(self._generate_statement(s, indent + 1) for s in func.body)
+
+        if not body.strip():
+            body = f"{tab}    pass\n"
+
+        return code + body + "\n"
 
     def _generate_statement(self, stmt, indent):
 
         tab = "    " * indent
+
+        if isinstance(stmt, Pass):
+            return f"{tab}pass\n"
+
+        if isinstance(stmt, Assignment):
+            return f"{tab}{self._generate_expr(stmt.target)} = {self._generate_expr(stmt.value)}\n"
+
+        if isinstance(stmt, AugAssign):
+            op_map = {"Add": "+=", "Sub": "-=", "Mult": "*=", "Div": "/=", "Mod": "%="}
+            op = op_map.get(stmt.operator, "+=")
+            return f"{tab}{self._generate_expr(stmt.target)} {op} {self._generate_expr(stmt.value)}\n"
+
+        if isinstance(stmt, PrintStatement):
+            args = ", ".join(self._generate_expr(a) for a in stmt.args)
+            return f"{tab}print({args})\n"
+
+        if isinstance(stmt, ListAppend):
+            return f"{tab}{self._generate_expr(stmt.list_obj)}.append({self._generate_expr(stmt.value)})\n"
+
+        if isinstance(stmt, DictPut):
+            return (
+                f"{tab}{self._generate_expr(stmt.dictionary)}"
+                f"[{self._generate_expr(stmt.key)}] = {self._generate_expr(stmt.value)}\n"
+            )
+
+        if isinstance(stmt, Field):
+            return ""
 
         if isinstance(stmt, Variable):
 
@@ -87,16 +151,22 @@ class PythonGenerator:
             return f"{tab}{stmt.name} = {self._generate_expr(stmt.value)}\n"
 
         if isinstance(stmt, Return):
+            if stmt.value is None:
+                return f"{tab}return\n"
             return f"{tab}return {self._generate_expr(stmt.value)}\n"
 
         if isinstance(stmt, IfStatement):
             code = f"{tab}if {self._generate_expr(stmt.condition)}:\n"
-            for s in stmt.body:
-                code += self._generate_statement(s, indent + 1)
+            body = "".join(self._generate_statement(s, indent + 1) for s in stmt.body)
+            code += body or f"{tab}    pass\n"
             if stmt.else_body:
+                # A lone nested if came from an elif; keep it flat.
+                if len(stmt.else_body) == 1 and isinstance(stmt.else_body[0], IfStatement):
+                    nested = self._generate_statement(stmt.else_body[0], indent)
+                    return code + f"{tab}el" + nested.lstrip()
                 code += f"{tab}else:\n"
-                for s in stmt.else_body:
-                    code += self._generate_statement(s, indent + 1)
+                inner = "".join(self._generate_statement(s, indent + 1) for s in stmt.else_body)
+                code += inner or f"{tab}    pass\n"
             return code
 
         if isinstance(stmt, ForLoop):
@@ -193,43 +263,91 @@ class PythonGenerator:
 
     def _generate_expr(self, expr):
 
+        if expr is None:
+            return "None"
+
+        if isinstance(expr, SelfRef):
+            return "self"
+
+        if isinstance(expr, AttributeAccess):
+            return f"{self._generate_expr(expr.obj)}.{expr.attribute}"
+
+        if isinstance(expr, UnaryOp):
+            op_map = {"USub": "-", "UAdd": "+", "Not": "not ", "Invert": "~"}
+            operand = self._generate_expr(expr.operand)
+            if isinstance(expr.operand, (BinaryOp, BooleanOp, TernaryOp)):
+                operand = f"({operand})"
+            return f"{op_map.get(expr.operator, '-')}{operand}"
+
+        if isinstance(expr, TernaryOp):
+            return (
+                f"{self._generate_expr(expr.if_true)} if "
+                f"{self._generate_expr(expr.condition)} else "
+                f"{self._generate_expr(expr.if_false)}"
+            )
+
+        if isinstance(expr, StringInterpolation):
+            parts = []
+            for part in expr.parts:
+                if isinstance(part, Constant) and isinstance(part.value, str):
+                    parts.append(part.value)
+                else:
+                    parts.append("{" + self._generate_expr(part) + "}")
+            return 'f"' + "".join(parts).replace('"', '\\"') + '"'
+
+        if isinstance(expr, IndexAccess):
+            return f"{self._generate_expr(expr.obj)}[{self._generate_expr(expr.index)}]"
+
+        if isinstance(expr, DictAccess):
+            return f"{self._generate_expr(expr.dictionary)}[{self._generate_expr(expr.key)}]"
+
+        if isinstance(expr, BooleanOp):
+            op_map = {
+                "And": "and", "Or": "or", "Eq": "==", "NotEq": "!=",
+                "Lt": "<", "Gt": ">", "LtE": "<=", "GtE": ">=",
+                "Is": "is", "IsNot": "is not", "In": "in", "NotIn": "not in",
+            }
+            op = op_map.get(expr.operator, expr.operator)
+            return f"{self._generate_expr(expr.left)} {op} {self._generate_expr(expr.right)}"
+
+        if isinstance(expr, DictLiteral):
+            pairs = ", ".join(
+                f"{self._generate_expr(k)}: {self._generate_expr(v)}"
+                for k, v in zip(expr.keys, expr.values)
+            )
+            return "{" + pairs + "}"
+
+        if isinstance(expr, SetLiteral):
+            if not expr.elements:
+                return "set()"
+            return "{" + ", ".join(self._generate_expr(e) for e in expr.elements) + "}"
+
+        if isinstance(expr, TypeCast):
+            cast = {"int": "int", "float": "float", "str": "str", "bool": "bool"}
+            return f"{cast.get(expr.target_type, 'str')}({self._generate_expr(expr.value)})"
+
+        if isinstance(expr, Input):
+            prompt = self._generate_expr(expr.prompt) if expr.prompt else ""
+            return f"input({prompt})"
+
+        if isinstance(expr, RangeCall):
+            return "range(" + ", ".join(self._generate_expr(a) for a in expr.args) + ")"
+
         if isinstance(expr, Constant):
             return repr(expr.value)
 
         if isinstance(expr, Identifier):
             return expr.name
 
-
         if isinstance(expr, BinaryOp):
             op_map = {
-                "&&": "and",
-                "||": "or",
-                "==": "==",
-                "!=": "!=",
-                ">": ">",
-                "<": "<",
-                ">=": ">=",
-                "<=": "<=",
-                "+": "+",
-                "-": "-",
-                "*": "*",
-                "/": "/",
-                "%": "%"
+                "Add": "+", "Sub": "-", "Mult": "*", "Div": "/",
+                "FloorDiv": "//", "Mod": "%", "Pow": "**",
+                "BitAnd": "&", "BitOr": "|", "BitXor": "^",
+                "LShift": "<<", "RShift": ">>",
             }
-
             op = op_map.get(expr.operator, expr.operator)
-
-            left = self._generate_expr(expr.left)
-            right = self._generate_expr(expr.right)
-
-            # If + operator and one side is string, convert to safe Python
-            if expr.operator == "+":
-                if isinstance(expr.left, Constant) and isinstance(expr.left.value, str):
-                    return f"{left}, {right}"
-                if isinstance(expr.right, Constant) and isinstance(expr.right.value, str):
-                    return f"{left}, {right}"
-
-            return f"{left} {op} {right}"
+            return f"{self._generate_expr(expr.left)} {op} {self._generate_expr(expr.right)}"
         
 
         if isinstance(expr, ArrayLiteral):
@@ -270,12 +388,7 @@ class PythonGenerator:
         
         if isinstance(expr, MethodCall):
 
-            # Array creation
-            if isinstance(expr, FunctionCall) and expr.name == "range_array":
-                size = self._generate_expr(expr.args[0])
-                return f"[0]*{size}"
-
-            object_name = expr.obj
+            object_name = self._generate_expr(expr.obj)
             method_name = expr.method
             arg_list = expr.args
 

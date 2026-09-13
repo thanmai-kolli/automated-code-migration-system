@@ -1,5 +1,9 @@
 from cross_language_system.core.ir_nodes import *
+from cross_language_system.parsers.c_like_parser import CLikeParser
 import re
+
+
+C_FAMILY = {"c", "cpp", "c++"}
 
 
 class CParser:
@@ -9,9 +13,22 @@ class CParser:
     - Preserves includes
     - Extracts globals
     - Extracts full functions with brace matching
+
+    Converting to another C-family language is a text rewrite, so the raw source
+    is preserved. Any other target needs a real IR, which CLikeParser provides.
     """
 
+    def __init__(self, target=None):
+        self.target = (target or "").lower()
+
     def parse(self, code):
+
+        if self.target and self.target not in C_FAMILY:
+            return CLikeParser().parse(code)
+
+        return self._parse_as_text(code)
+
+    def _parse_as_text(self, code):
 
         includes = []
         macros = []

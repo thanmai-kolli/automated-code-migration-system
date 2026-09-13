@@ -87,10 +87,11 @@ class Program(IRNode):
 
 class Class(IRNode):
 
-    def __init__(self, name, methods=None, fields=None):
+    def __init__(self, name, methods=None, fields=None, base=None):
         self.name = name
         self.methods = methods or []
         self.fields = fields or []
+        self.base = base
 
 
 # ------------------------------------------------------------
@@ -99,11 +100,18 @@ class Class(IRNode):
 
 class Function(IRNode):
 
-    def __init__(self, name, params=None, body=None, return_type="void"):
+    def __init__(self, name, params=None, body=None, return_type="void",
+                 is_constructor=False, is_static=True, param_types=None,
+                 owner=None):
         self.name = name
         self.params = params or []
         self.body = body or []
         self.return_type = return_type
+        self.is_constructor = is_constructor
+        # Top-level functions stay static; methods bound to an instance do not.
+        self.is_static = is_static
+        self.param_types = param_types or {}
+        self.owner = owner
 
 
 # ------------------------------------------------------------
@@ -278,3 +286,111 @@ class Break(IRNode):
 
 class Continue(IRNode):
     pass
+
+
+# ---------------- PASS / NO-OP ----------------
+
+class Pass(IRNode):
+    pass
+
+
+# ------------------------------------------------------------
+# Attribute Access  (self.balance, obj.field)
+# ------------------------------------------------------------
+
+class AttributeAccess(Expression):
+
+    def __init__(self, obj, attribute):
+        self.obj = obj
+        self.attribute = attribute
+
+
+# ------------------------------------------------------------
+# Self / this reference
+# ------------------------------------------------------------
+
+class SelfRef(Expression):
+    pass
+
+
+# ------------------------------------------------------------
+# Unary Operation  (-x, not x, ~x)
+# ------------------------------------------------------------
+
+class UnaryOp(Expression):
+
+    def __init__(self, operator, operand):
+        self.operator = operator  # USub, UAdd, Not, Invert
+        self.operand = operand
+
+
+# ------------------------------------------------------------
+# Assignment to an existing target (attribute, index, name)
+#
+# Distinct from Variable, which declares a NEW local.
+# ------------------------------------------------------------
+
+class Assignment(IRNode):
+
+    def __init__(self, target, value):
+        self.target = target
+        self.value = value
+
+
+# ------------------------------------------------------------
+# Augmented Assignment  (x += 1)
+# ------------------------------------------------------------
+
+class AugAssign(IRNode):
+
+    def __init__(self, target, operator, value):
+        self.target = target
+        self.operator = operator
+        self.value = value
+
+
+# ------------------------------------------------------------
+# Class Field / Member Variable
+# ------------------------------------------------------------
+
+class Field(IRNode):
+
+    def __init__(self, name, field_type="Object", value=None):
+        self.name = name
+        self.field_type = field_type
+        self.value = value
+
+
+# ------------------------------------------------------------
+# Index Access  (arr[i]) — distinct from DictAccess so generators
+# can emit arr[i] instead of arr.get(i) when the target is a list.
+# ------------------------------------------------------------
+
+class IndexAccess(Expression):
+
+    def __init__(self, obj, index):
+        self.obj = obj
+        self.index = index
+
+
+# ------------------------------------------------------------
+# String formatting (f-strings, % formatting, .format)
+# ------------------------------------------------------------
+
+class StringInterpolation(Expression):
+
+    def __init__(self, parts=None):
+        # parts: list of Constant (literal text) and Expression (holes)
+        self.parts = parts or []
+
+
+# ------------------------------------------------------------
+# Ternary / conditional expression  (a if c else b)
+# ------------------------------------------------------------
+
+class TernaryOp(Expression):
+
+    def __init__(self, condition, if_true, if_false):
+        self.condition = condition
+        self.if_true = if_true
+        self.if_false = if_false

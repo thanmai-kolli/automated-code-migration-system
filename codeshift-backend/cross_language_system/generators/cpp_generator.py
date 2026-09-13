@@ -1,25 +1,114 @@
 import re
 from cross_language_system.core.ir_nodes import *
+from cross_language_system.generators.c_family import CFamilyGenerator
 
 
-class CppGenerator:
+class CppGenerator(CFamilyGenerator):
+
+    cpp = True
 
     def __init__(self, source=None, target=None):
-        self.source = source
-        self.target = target
-
+        super().__init__(source, target)
 
     def generate(self, program):
 
-        code = ""
+        # The C parser emits raw source chunks; everything else emits a real IR.
+        if any(isinstance(getattr(n, "body", None), str) for n in program.body):
+            return "".join(self._convert_block(n.body) for n in program.body)
 
-        for node in program.body:
-            code += self._convert_block(node.body)
-
-        return code
+        return self.generate_from_ir(program)
 
     # -----------------------------------------
-    # Convert C constructs to C++
+    # IR PATH
+    # -----------------------------------------
+
+    def headers(self, program):
+
+        code = "#include <iostream>\n#include <string>\n#include <vector>\n#include <map>\n"
+        code += "using namespace std;\n\n"
+        return code
+
+    def interpolation(self, node):
+
+        parts = []
+        for part in node.parts:
+            if isinstance(part, Constant) and isinstance(part.value, str):
+                if part.value:
+                    parts.append(self.constant(part.value))
+            else:
+                parts.append(f"to_string({self.expr(part)})")
+
+        return " + ".join(parts) if parts else '""'
+
+    def print_statement(self, stmt, indent):
+
+        tab = "    " * indent
+        if not stmt.args:
+            return f"{tab}cout << endl;\n"
+
+        pieces = ' << " " << '.join(self.expr(a) for a in stmt.args)
+        return f"{tab}cout << {pieces} << endl;\n"
+
+    def render_class(self, cls):
+
+        previous = self.current_class
+        self.current_class = cls
+
+        base = f" : public {cls.base}" if cls.base else ""
+        code = f"class {cls.name}{base} {{\npublic:\n"
+
+        for field in cls.fields:
+            code += f"    {self.type_of(field.field_type)} {field.name};\n"
+
+        if cls.fields:
+            code += "\n"
+
+        for method in cls.methods:
+            code += self.render_function(method, indent=1, owner=cls)
+
+        code += "};\n\n"
+        self.current_class = previous
+        return code
+
+    def render_function(self, func, indent=0, owner=None):
+
+        tab = "    " * indent
+        outer_scope = self.scope
+        self.scope = dict(outer_scope)
+
+        params = []
+        for p in func.params:
+            rendered = self.type_of(func.param_types.get(p, "Object"))
+            params.append(f"{rendered} {p}")
+            self.scope[p] = rendered
+
+        if owner:
+            for field in owner.fields:
+                self.scope[field.name] = self.type_of(field.field_type)
+
+        signature = ", ".join(params)
+        return_type = self.type_of(func.return_type)
+
+        # C++ has no Object root type, so an unresolved element type becomes a
+        # template parameter rather than an invalid vector<auto>.
+        prefix = ""
+        if "auto" in signature and "<auto>" in signature:
+            signature = signature.replace("<auto>", "<T>")
+            return_type = return_type.replace("<auto>", "<T>")
+            prefix = f"{tab}template <typename T>\n"
+
+        if func.is_constructor and owner:
+            code = f"{prefix}{tab}{owner.name}({signature}) {{\n"
+        else:
+            code = f"{prefix}{tab}{return_type} {func.name}({signature}) {{\n"
+
+        for stmt in func.body:
+            code += self.statement(stmt, indent + 1)
+
+        self.scope = outer_scope
+        return code + f"{tab}}}\n\n"
+    # -----------------------------------------
+    # Convert C constructs to C++ (text path)
     # -----------------------------------------
     def _convert_block(self, text):
 

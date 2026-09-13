@@ -7,11 +7,8 @@ export default function ConfigurationStep({ mode, onBack, onContinue }) {
   const [targetLang, setTargetLang] = useState("");
 
   const getValidTargets = () => {
-    if (sourceLang === "Python") return ["Java"];
-    if (sourceLang === "Java") return ["Python"];
-    if (sourceLang === "C") return ["C++"];
-    if (sourceLang === "C++") return ["C"];
-    return [];
+    if (!sourceLang) return [];
+    return LANGUAGES.filter((lang) => lang !== sourceLang);
   };
 
   const handleContinue = () => {

@@ -2,6 +2,23 @@ import javalang
 from cross_language_system.core.ir_nodes import *
 
 
+# javalang reports operators as Java symbols; the IR uses neutral names so that
+# every generator can share one operator table regardless of source language.
+ARITHMETIC_OPS = {
+    "+": "Add", "-": "Sub", "*": "Mult", "/": "Div", "%": "Mod",
+    "&": "BitAnd", "|": "BitOr", "^": "BitXor", "<<": "LShift", ">>": "RShift",
+}
+
+COMPARISON_OPS = {
+    "==": "Eq", "!=": "NotEq", "<": "Lt", ">": "Gt",
+    "<=": "LtE", ">=": "GtE", "&&": "And", "||": "Or",
+}
+
+COMPOUND_OPS = {
+    "+=": "Add", "-=": "Sub", "*=": "Mult", "/=": "Div", "%=": "Mod",
+}
+
+
 class JavaParser:
 
     def parse(self, code):
@@ -19,32 +36,77 @@ class JavaParser:
 
     def _handle_class(self, node):
 
+        fields = []
+        for member in node.fields:
+            declared = self._type_name(member.type)
+            for declarator in member.declarators:
+                fields.append(Field(
+                    declarator.name,
+                    declared,
+                    self._handle_expression(declarator.initializer)
+                    if declarator.initializer else None,
+                ))
+
         methods = []
 
-        for method in node.methods:
-            methods.append(self._handle_method(method))
+        for constructor in getattr(node, "constructors", None) or []:
+            methods.append(self._handle_method(constructor, node.name, is_constructor=True))
 
-        return Class(node.name, methods)
+        for method in node.methods:
+            methods.append(self._handle_method(method, node.name))
+
+        base = node.extends.name if node.extends else None
+
+        return Class(node.name, methods, fields, base)
 
     # ---------------- METHOD ----------------
 
-    def _handle_method(self, node):
+    def _handle_method(self, node, owner=None, is_constructor=False):
 
         params = [p.name for p in node.parameters]
-        body = []
+        param_types = {p.name: self._type_name(p.type) for p in node.parameters}
 
+        body = []
         if node.body:
             for stmt in node.body:
                 parsed = self._handle_statement(stmt)
                 if parsed:
                     body.append(parsed)
 
+        modifiers = getattr(node, "modifiers", None) or set()
+
         return Function(
-            node.name,
+            owner if is_constructor else node.name,
             params,
             body,
-            node.return_type.name if node.return_type else "void"
+            self._type_name(getattr(node, "return_type", None)) or "void",
+            is_constructor=is_constructor,
+            is_static="static" in modifiers or owner is None,
+            param_types=param_types,
+            owner=owner,
         )
+
+    def _type_name(self, type_node):
+
+        if type_node is None:
+            return "void"
+
+        name = getattr(type_node, "name", None)
+        if not name:
+            return "Object"
+
+        arguments = getattr(type_node, "arguments", None)
+        if arguments:
+            inner = ", ".join(
+                self._type_name(a.type) if getattr(a, "type", None) else "Object"
+                for a in arguments
+            )
+            return f"{name}<{inner}>"
+
+        if getattr(type_node, "dimensions", None):
+            return f"List<{name}>"
+
+        return name
 
     # ---------------- STATEMENTS ----------------
 
@@ -191,7 +253,8 @@ class JavaParser:
             if isinstance(expr, javalang.tree.Assignment):
 
                 left = expr.expressionl
-                right = expr.value
+                right = self._handle_expression(expr.value)
+                operator = getattr(expr, "type", "=")
 
                 # Handle array index assignment arr[i] = value
                 if isinstance(left, javalang.tree.ArraySelector):
@@ -201,20 +264,23 @@ class JavaParser:
                     return MethodCall(
                         array_name,
                         "set_index",
-                        [index, self._handle_expression(right)]
+                        [index, right]
                     )
 
-                # Normal variable assignment
-                if hasattr(left, "member"):
-                    var_name = left.member
-                else:
-                    var_name = left.name
+                target = self._handle_expression(left)
 
-                return Variable(
-                    var_name,
-                    "auto",
-                    self._handle_expression(right)
-                )
+                if operator in COMPOUND_OPS:
+                    return AugAssign(target, COMPOUND_OPS[operator], right)
+
+                # Writing through this/obj mutates existing state rather than
+                # declaring a new local.
+                if isinstance(target, AttributeAccess):
+                    return Assignment(target, right)
+
+                if isinstance(target, Identifier):
+                    return Variable(target.name, "auto", right)
+
+                return Assignment(target, right)
 
             # Method call: nums.add(5)
             if isinstance(expr, javalang.tree.MethodInvocation):
@@ -310,26 +376,45 @@ class JavaParser:
 
             return Constant(int(value))
 
+        # THIS  (this / this.field / this.method())
+        if isinstance(expr, javalang.tree.This):
+
+            node = SelfRef()
+
+            for selector in (expr.selectors or []):
+                if isinstance(selector, javalang.tree.MemberReference):
+                    node = AttributeAccess(node, selector.member)
+                elif isinstance(selector, javalang.tree.MethodInvocation):
+                    node = MethodCall(
+                        node,
+                        selector.member,
+                        [self._handle_expression(a) for a in selector.arguments],
+                    )
+
+            return node
+
         # IDENTIFIER
         if isinstance(expr, javalang.tree.MemberReference):
 
-            # If it has qualifier (like object.field)
-            if expr.qualifier:
-                return Identifier(f"{expr.qualifier}.{expr.member}")
+            base = (
+                AttributeAccess(Identifier(expr.qualifier), expr.member)
+                if expr.qualifier
+                else Identifier(expr.member)
+            )
 
-            return Identifier(expr.member)
+            return self._apply_prefix(expr, base)
 
         # BINARY OP
         if isinstance(expr, javalang.tree.BinaryOperation):
 
             operator = expr.operator
+            left = self._handle_expression(expr.operandl)
+            right = self._handle_expression(expr.operandr)
 
-            
-            return BinaryOp(
-                self._handle_expression(expr.operandl),
-                operator,
-                self._handle_expression(expr.operandr)
-            )
+            if operator in COMPARISON_OPS:
+                return BooleanOp(left, COMPARISON_OPS[operator], right)
+
+            return BinaryOp(left, ARITHMETIC_OPS.get(operator, "Add"), right)
 
         
 
@@ -337,15 +422,15 @@ class JavaParser:
         if isinstance(expr, javalang.tree.MethodInvocation):
 
             if expr.member == "equals" and expr.qualifier:
-                return BinaryOp(
+                return BooleanOp(
                     Identifier(expr.qualifier),
-                    "==",
+                    "Eq",
                     self._handle_expression(expr.arguments[0])
                 )
 
             if expr.qualifier:
                 return MethodCall(
-                    expr.qualifier,
+                    Identifier(expr.qualifier),
                     expr.member,
                     [self._handle_expression(a) for a in expr.arguments]
                 )
@@ -363,10 +448,9 @@ class JavaParser:
 
         # Array access arr[i]
         if isinstance(expr, javalang.tree.ArraySelector):
-            return MethodCall(
-                expr.member,
-                "get_index",
-                [self._handle_expression(expr.index)]
+            return IndexAccess(
+                Identifier(expr.member),
+                self._handle_expression(expr.index)
             )
 
         # OBJECT CREATION
@@ -377,3 +461,14 @@ class JavaParser:
             )
 
         return Constant(None)
+
+    @staticmethod
+    def _apply_prefix(expr, node):
+        """Wrap a node in whatever prefix operators javalang attached to it."""
+
+        for operator in reversed(getattr(expr, "prefix_operators", None) or []):
+            mapped = {"-": "USub", "+": "UAdd", "!": "Not", "~": "Invert"}.get(operator)
+            if mapped:
+                node = UnaryOp(mapped, node)
+
+        return node

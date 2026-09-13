@@ -27,6 +27,15 @@ class JavaGenerator:
 
         return wrapper_map.get(primitive, primitive)
 
+    @staticmethod
+    def _escape(text):
+        return (
+            text.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("\n", "\\n")
+            .replace("\t", "\\t")
+        )
+
     # -------------------------------------------------
     # ENTRY POINT
     # -------------------------------------------------
@@ -67,7 +76,7 @@ class JavaGenerator:
         code += "    public static void main(String[] args) {\n"
 
         if not main_statements and function_names:
-            # Prefer calling a no-parameter function
+            # Only a zero-argument function can be invoked without inventing values.
             first_function = None
 
             for node in program.body:
@@ -75,10 +84,8 @@ class JavaGenerator:
                     first_function = node.name
                     break
 
-            if not first_function:
-                first_function = function_names[-1]
-
-            code += f"        {first_function}();\n"
+            if first_function:
+                code += f"        {first_function}();\n"
 
         # Inject top-level statements (like print, variable, loops, etc.)
         for stmt in main_statements:
@@ -108,90 +115,92 @@ class JavaGenerator:
 
     def _generate_class(self, cls):
 
-        code = f"    public static class {cls.name} {{\n"
+        previous_class = getattr(self, "current_class", None)
+        self.current_class = cls
+
+        extends = f" extends {cls.base}" if cls.base else ""
+        code = f"    public static class {cls.name}{extends} {{\n"
+
+        for field in cls.fields:
+            code += f"        private {self._java_type(field.field_type)} {field.name};\n"
+
+        if cls.fields:
+            code += "\n"
 
         for method in cls.methods:
-            code += self._generate_function(method, indent=2)
+            code += self._generate_function(method, indent=2, owner=cls)
 
-        code += "    }\n"
+        code += "    }\n\n"
+        self.current_class = previous_class
         return code
 
     # -------------------------------------------------
     # FUNCTION
     # -------------------------------------------------
 
-    def _generate_function(self, func, indent=1):
+    def _generate_function(self, func, indent=1, owner=None):
 
         tab = "    " * indent
-        params = []
         self.symbol_table = SymbolTable()
 
-        # -------- PARAMETER TYPE INFERENCE --------
+        params = []
         for p in func.params:
-
-            inferred_type = "List<Object>"
-
-            # Check if function was called
-            if func.name in self.function_param_types:
-                inferred_type = self.function_param_types[func.name][func.params.index(p)]
-
-            # Detect if used in loop
-            for stmt in func.body:
-                if isinstance(stmt, ForLoop):
-
-                    if isinstance(stmt.iterable, Identifier) and stmt.iterable.name == p:
-
-                        element_type = self._infer_list_element_type(func, p)
-
-                        inferred_type = f"List<{element_type}>"
-
-            param_type = self.mapper.map(
-                inferred_type,
-                self.source_lang,
-                self.target_lang
-            )
-
+            param_type = self._java_type(func.param_types.get(p, "Object"))
             params.append(f"{param_type} {p}")
             self.symbol_table.register_variable(p, param_type)
 
-        # -------- RETURN TYPE INFERENCE --------
+        if owner:
+            for field in owner.fields:
+                self.symbol_table.register_variable(field.name, self._java_type(field.field_type))
 
-        has_return = False
-        inferred = "void"
+        signature = ", ".join(params)
 
-        for stmt in func.body:
-            if isinstance(stmt, Return):
-                has_return = True
-                inferred = self.inference_engine.infer(stmt.value)
-                if isinstance(stmt.value, Identifier):
-                    var_type = self.symbol_table.lookup(stmt.value.name)
-                    if var_type:
-                        inferred = var_type
-                break
-
-        # If no return statement → void
-        if not has_return:
-            return_type = "void"
-
-        elif isinstance(inferred, str) and inferred.startswith("List<"):
-            return_type = inferred
-
+        if func.is_constructor and owner:
+            code = f"{tab}public {owner.name}({signature}) {{\n"
         else:
-            return_type = self.mapper.map(
-                inferred,
-                self.source_lang,
-                self.target_lang
-            )
-        code = f"{tab}public static {return_type} {func.name}({', '.join(params)}) {{\n"
-
-        self.function_returns[func.name] = return_type
+            return_type = self._java_type(func.return_type)
+            self.function_returns[func.name] = return_type
+            modifier = "public" if owner else "public static"
+            code = f"{tab}{modifier} {return_type} {func.name}({signature}) {{\n"
 
         for stmt in func.body:
             code += self._generate_statement(stmt, indent + 1)
 
-        code += f"{tab}}}\n"
+        code += f"{tab}}}\n\n"
 
         return code
+
+    # -------------------------------------------------
+    # TYPE RENDERING
+    # -------------------------------------------------
+
+    def _java_type(self, type_name):
+        """Render a neutral IR type as Java."""
+
+        if not type_name or type_name in ("auto", "Object", "object"):
+            return "Object"
+
+        if type_name == "void":
+            return "void"
+
+        direct = {
+            "int": "int",
+            "float": "double",
+            "double": "double",
+            "bool": "boolean",
+            "boolean": "boolean",
+            "str": "String",
+            "String": "String",
+        }
+
+        if type_name in direct:
+            return direct[type_name]
+
+        if type_name.startswith(("List<", "Map<", "Set<")):
+            return type_name
+
+        mapped = self.mapper.map(type_name, self.source_lang, self.target_lang)
+        return mapped or "Object"
 
     # -------------------------------------------------
     # STATEMENTS
@@ -200,6 +209,35 @@ class JavaGenerator:
     def _generate_statement(self, stmt, indent):
 
         tab = "    " * indent
+
+        if isinstance(stmt, Pass):
+            return ""
+
+        if isinstance(stmt, Break):
+            return f"{tab}break;\n"
+
+        if isinstance(stmt, Continue):
+            return f"{tab}continue;\n"
+
+        if isinstance(stmt, Assignment):
+            return f"{tab}{self._generate_expr(stmt.target)} = {self._generate_expr(stmt.value)};\n"
+
+        if isinstance(stmt, AugAssign):
+            op_map = {"Add": "+=", "Sub": "-=", "Mult": "*=", "Div": "/=", "Mod": "%="}
+            op = op_map.get(stmt.operator, "+=")
+            return f"{tab}{self._generate_expr(stmt.target)} {op} {self._generate_expr(stmt.value)};\n"
+
+        if isinstance(stmt, TryCatch):
+            exception = stmt.exception_type or "Exception"
+            code = f"{tab}try {{\n"
+            for s in stmt.try_body:
+                code += self._generate_statement(s, indent + 1)
+            code += f"{tab}}} catch ({exception} {stmt.catch_var or 'e'}) {{\n"
+            for s in stmt.catch_body:
+                code += self._generate_statement(s, indent + 1)
+            code += f"{tab}}}\n"
+            return code
+
         if isinstance(stmt, FunctionCall):
             args = ", ".join(self._generate_expr(a) for a in stmt.args)
             return f"{tab}{stmt.name}({args});\n"
@@ -277,23 +315,8 @@ class JavaGenerator:
 
                 return prompt_code + f"{tab}String {stmt.name} = sc.nextLine();\n"
 
-            inferred_type = self.inference_engine.infer(stmt.value, stmt.name)
-
-            if (
-                inferred_type in ["Integer", "Double", "Boolean", "String"]
-                or inferred_type.startswith("List<")
-                or inferred_type.startswith("Set<")
-                or inferred_type.startswith("Map<")
-            ):
-                java_type = java_type = self._fix_java_generics(inferred_type)
-            else:
-                java_type = self._fix_java_generics(
-                    self.mapper.map(
-                        inferred_type,
-                        self.source_lang,
-                        self.target_lang
-                    )
-                )
+            # The annotator already resolved this declaration's type.
+            java_type = self._fix_java_generics(self._java_type(stmt.var_type))
 
             # Check if variable already declared
             existing_type = self.symbol_table.lookup(stmt.name)
@@ -307,6 +330,8 @@ class JavaGenerator:
                 return f"{tab}{java_type} {stmt.name} = {self._generate_expr(stmt.value)};\n"
 
         if isinstance(stmt, Return):
+            if stmt.value is None:
+                return f"{tab}return;\n"
             return f"{tab}return {self._generate_expr(stmt.value)};\n"
 
         if isinstance(stmt, IfStatement):
@@ -317,6 +342,11 @@ class JavaGenerator:
                 code += self._generate_statement(s, indent + 1)
 
             if stmt.else_body:
+                # A lone nested if is an elif in the source; keep it as else-if.
+                if len(stmt.else_body) == 1 and isinstance(stmt.else_body[0], IfStatement):
+                    nested = self._generate_statement(stmt.else_body[0], indent).lstrip()
+                    return code + f"{tab}}} else {nested}"
+
                 code += f"{tab}}} else {{\n"
                 for s in stmt.else_body:
                     code += self._generate_statement(s, indent + 1)
@@ -382,8 +412,8 @@ class JavaGenerator:
             if len(parts) == 1:
                 final_expr = parts[0]
             else:
-                # final_expr = " + \" \" + ".join(parts)
-                final_expr = " + ".join(parts)
+                # Python's print separates its arguments with a space.
+                final_expr = ' + " " + '.join(parts)
 
             return f"{tab}System.out.println({final_expr});\n"
         
@@ -426,6 +456,47 @@ class JavaGenerator:
 
     def _generate_expr(self, expr):
 
+        if expr is None:
+            return "null"
+
+        if isinstance(expr, SelfRef):
+            return "this"
+
+        if isinstance(expr, AttributeAccess):
+            return f"{self._generate_expr(expr.obj)}.{expr.attribute}"
+
+        if isinstance(expr, UnaryOp):
+            op_map = {"USub": "-", "UAdd": "+", "Not": "!", "Invert": "~"}
+            operand = self._generate_expr(expr.operand)
+            if isinstance(expr.operand, (BinaryOp, BooleanOp, TernaryOp)):
+                operand = f"({operand})"
+            return f"{op_map.get(expr.operator, '-')}{operand}"
+
+        if isinstance(expr, TernaryOp):
+            return (
+                f"{self._generate_expr(expr.condition)} ? "
+                f"{self._generate_expr(expr.if_true)} : "
+                f"{self._generate_expr(expr.if_false)}"
+            )
+
+        if isinstance(expr, StringInterpolation):
+            parts = []
+            for part in expr.parts:
+                if isinstance(part, Constant) and isinstance(part.value, str):
+                    if part.value:
+                        parts.append(f'"{self._escape(part.value)}"')
+                else:
+                    parts.append(self._generate_expr(part))
+            return " + ".join(parts) if parts else '""'
+
+        if isinstance(expr, IndexAccess):
+            container = self._generate_expr(expr.obj)
+            index = self._generate_expr(expr.index)
+            container_type = self.symbol_table.lookup(container) or ""
+            if container_type.startswith("Map<"):
+                return f"{container}.get({index})"
+            return f"{container}.get({index})"
+
         if isinstance(expr, TypeCast):
 
             inner = self._generate_expr(expr.value)
@@ -440,11 +511,14 @@ class JavaGenerator:
 
         if isinstance(expr, Constant):
 
-            if isinstance(expr.value, str):
-                return f"\"{expr.value}\""
+            if expr.value is None:
+                return "null"
 
             if isinstance(expr.value, bool):
                 return str(expr.value).lower()
+
+            if isinstance(expr.value, str):
+                return f'"{self._escape(expr.value)}"'
 
             return str(expr.value)
 
@@ -458,13 +532,25 @@ class JavaGenerator:
                 "Sub": "-",
                 "Mult": "*",
                 "Div": "/",
+                "FloorDiv": "/",
                 "Mod": "%",
                 "Pow": "^"
             }
 
             operator = op_map.get(expr.operator, "+")
+            left = self._generate_expr(expr.left)
+            right = self._generate_expr(expr.right)
 
-            return f"{self._generate_expr(expr.left)} {operator} {self._generate_expr(expr.right)}"
+            # Python's / is always float division; Java's / on two ints is not.
+            if (
+                expr.operator == "Div"
+                and self.source_lang == "python"
+                and self._infer_type(expr.left) in ("int", "Integer")
+                and self._infer_type(expr.right) in ("int", "Integer")
+            ):
+                left = f"(double) {left}"
+
+            return f"{left} {operator} {right}"
 
         if isinstance(expr, BooleanOp):
 
@@ -525,7 +611,8 @@ class JavaGenerator:
             return f"{self._generate_expr(expr.dictionary)}.get({self._generate_expr(expr.key)})"
 
         if isinstance(expr, ObjectCreation):
-            return f"new {expr.class_name}()"
+            args = ", ".join(self._generate_expr(a) for a in (expr.arguments or []))
+            return f"new {expr.class_name}({args})"
 
         if isinstance(expr, SetLiteral):
 
@@ -578,6 +665,21 @@ class JavaGenerator:
 
         if isinstance(value, FunctionCall):
             return self.function_returns.get(value.name, "Object")
+
+        if isinstance(value, MethodCall):
+            return "int" if value.method == "size" else "Object"
+
+        if isinstance(value, UnaryOp):
+            return "boolean" if value.operator == "Not" else self._infer_type(value.operand)
+
+        if isinstance(value, AttributeAccess):
+            current = getattr(self, "current_class", None)
+            if current:
+                for field in current.fields:
+                    if field.name == value.attribute:
+                        return self._java_type(field.field_type)
+            return "Object"
+
         # -------- CONSTANT --------
         if isinstance(value, Constant):
 

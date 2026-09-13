@@ -1,6 +1,7 @@
 from cross_language_system.core.language_registry import LanguageRegistry
 from cross_language_system.core.semantic_analyzer import SemanticAnalyzer
 from cross_language_system.core.confidence_engine import ConfidenceEngine
+from cross_language_system.core.type_annotator import TypeAnnotator
 from cross_language_system.utils.diff_generator import DiffGenerator
 from cross_language_system.core.accuracy_engine import AccuracyEngine
 from cross_language_system.core.token_similarity import compute_token_similarity
@@ -23,7 +24,7 @@ class CrossLanguageEngine:
         if source == target:
             return {"error": "Source and target language cannot be same."}
 
-        parser = self._get_parser(source)
+        parser = self._get_parser(source, target)
         generator = self._get_generator(source, target)
         validator = self._get_validator(target)
 
@@ -31,6 +32,10 @@ class CrossLanguageEngine:
         ir = parser.parse(code)
         if ir is None:
             return {"error": "Parsing failed. IR is None."}
+
+        # Resolve concrete types before generation so statically typed targets
+        # do not have to fall back to Object.
+        TypeAnnotator().annotate(ir)
 
         # Semantic validation
         analyzer = SemanticAnalyzer()
@@ -107,7 +112,7 @@ class CrossLanguageEngine:
     }
     # ---------------- Parser Loader ----------------
 
-    def _get_parser(self, source):
+    def _get_parser(self, source, target=None):
 
         if source == "python":
             from cross_language_system.parsers.python_parser import PythonParser
@@ -119,11 +124,11 @@ class CrossLanguageEngine:
 
         if source in ["cpp","c++"]:
             from cross_language_system.parsers.cpp_parser import CppParser
-            return CppParser()
+            return CppParser(target)
 
         if source == "c":
             from cross_language_system.parsers.c_parser import CParser
-            return CParser()
+            return CParser(target)
 
     # ---------------- Generator Loader ----------------
 
