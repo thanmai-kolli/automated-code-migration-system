@@ -1,34 +1,23 @@
 import os
+
 import joblib
+
+from cross_language_system.core.model_features import to_frame
 
 
 class ConfidenceEngine:
+    """Predicts P(the migration preserves behaviour).
+
+    A classifier rather than a regressor, so the score is a calibrated
+    probability instead of an arbitrary number clamped into [0, 1].
+    """
 
     def __init__(self):
-
         model_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "ml",
-            "confidence_model.pkl"
+            os.path.dirname(__file__), "..", "ml", "confidence_model.pkl"
         )
-
         self.model = joblib.load(model_path)
 
     def predict(self, features):
-
-        vector = [[
-            features["diff_count"],
-            features["semantic_issues"],
-            features["compile_success"],
-            features["risk_score"],
-            features["token_similarity"],
-            features["ast_similarity"],
-            features["structure_similarity"]
-        ]]
-
-        score = self.model.predict(vector)[0]
-
-        score = max(min(score, 1), 0)
-
-        return round(float(score), 3)
+        probability = self.model.predict_proba(to_frame(features))[0][1]
+        return round(float(probability), 3)

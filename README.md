@@ -95,6 +95,12 @@ direction compiles with the real toolchain (`javac` / `gcc` / `g++` / `ast.parse
 | **C →** | 96.9 | 92.3 | — | 100 |
 | **C++ →** | 96.3 | 92.0 | 100 | — |
 
+> These samples are self-contained — they do not read stdin. On the stdin-driven corpus
+> used to train the scoring models, only 65 of 120 migrations compile and 31 reproduce
+> behaviour exactly, because input handling does not yet cross language families. Both
+> numbers are real; they measure different things, and the gap is the honest picture of
+> where the engine stands.
+
 ---
 
 ## Quick start
@@ -222,15 +228,15 @@ behavioural regression is caught with no expected output written at all.
 ```bash
 cd codeshift-backend
 pip install pytest
-python -m pytest -q          # 120 tests
+python -m pytest -q          # 141 tests
 ```
 
 Covers the Python version detector, the AST validator, every Python 2 → 3 rule,
 indentation-preserving upgrades, diff/change counting, the language registry,
 similarity scoring, every API route including the 1 MB payload limit, the test executor
-(parsing, the opt-in gate, timeouts, cleanup, cross-language runs), plus conversion
-fidelity: parser coverage, type inference, generated-code content, and a compile check
-on all 12 language pairs.
+(parsing, the opt-in gate, timeouts, cleanup, cross-language runs), the scoring models
+and their dataset, plus conversion fidelity: parser coverage, type inference,
+generated-code content, and a compile check on all 12 language pairs.
 
 ```bash
 cd codeshift-frontend
@@ -274,32 +280,54 @@ deliberately expects the wrong answer, and is caught.
 
 ---
 
-## ML models
+## Scoring models
 
-Four scikit-learn models ship with the repo as `.pkl` files:
+The two scores in the report are predicted by models fitted on **measured
+migrations**, not on hand-written rules.
 
-| Model | Task | Trained on |
+`ml/build_dataset.py` takes a corpus of 40 stdin-driven programs (10 per language),
+runs each through the engine to all three other languages, and records what actually
+happened: the features the engine computed, whether the real toolchain accepted the
+output, and what fraction of inputs the migration reproduced byte-for-byte. That
+produces **120 measured migrations across all 12 language pairs** in
+`ml/migration_dataset.csv`.
+
+| Model | Predicts | Type |
 | --- | --- | --- |
-| `confidence_model.pkl` | reliability of a conversion (0–1) | `ml/confidence_training_data.csv` (500 rows) |
-| `accuracy_model.pkl` | transformation accuracy (0–100) | `ml/accuracy_training_data.csv` (500 rows) |
-| `language_model.pkl` | source-language auto-detection | generated corpus |
-| `version_confidence_model.pkl` | upgrade confidence | `core/version_training_data.csv` |
+| `accuracy_model.pkl` | `behaviour_score` — % of inputs reproduced exactly | regressor |
+| `confidence_model.pkl` | `P(behaviour preserved)` | classifier |
+| `language_model.pkl` | source language, when the caller omits it | classifier |
 
-Features are shared across the first two: `diff_count`, `semantic_issues`,
-`compile_success`, `risk_score`, `token_similarity`, `ast_similarity`,
-`structure_similarity`.
+Features: `diff_count`, `semantic_issues`, `compile_success`, `risk_score`,
+`token_similarity`, `ast_similarity`, `structure_similarity`.
 
-Retrain any of them from source:
+**Measured performance.** Grouped 5-fold cross-validation — every row for a given
+corpus program stays in one fold, so a model cannot score well by recognising a
+program it saw in another target language. Both are compared against a baseline that
+ignores the features entirely:
+
+| | model | baseline |
+| --- | --- | --- |
+| accuracy — MAE | **13.9** | 38.3 |
+| accuracy — R² | **0.704** | −0.009 |
+| confidence — accuracy | **0.900** | 0.742 |
+| confidence — ROC AUC | **0.974** | 0.500 |
+
+Rebuild and retrain from scratch:
 
 ```bash
-cd codeshift-backend/cross_language_system/ml
-python train_confidence_model.py
-python train_accuracy_model.py
+cd codeshift-backend
+set CODESHIFT_ENABLE_TEST_EXECUTION=1
+python -m cross_language_system.ml.build_dataset   # ~2 min, compiles and runs everything
+python -m cross_language_system.ml.train_models
 ```
 
-> The pinned `scikit-learn` version in `requirements.txt` matches the version the models
-> were fitted with. Installing a different minor release will emit
-> `InconsistentVersionWarning` — retrain rather than ignore it.
+> **What the dataset says about the engine.** Of 120 migrations, 65 compile and 31
+> reproduce behaviour exactly. The dominant failure is that **stdin handling does not
+> cross language families** — `scanf`, `cin >>` and `Scanner` are not mapped to each
+> other or to `input()`, so most non-Python sources fail once they read input. That is
+> the single highest-value fix available, and it was invisible until these migrations
+> were actually executed.
 
 ---
 
@@ -314,7 +342,7 @@ codeshift-backend/
     core/                           dispatcher, IR, type annotator, symbol table,
                                     semantic analyzer, similarity + scoring engines
     parsers/ generators/ validators/    one module per language
-    ml/                             models, training data, training scripts
+    ml/                             corpus, dataset builder, training, models
   version_upgrade_system/
     config.py                       target version per language
     core/                           upgrade engine, risk scorer, confidence model
@@ -332,6 +360,10 @@ codeshift-frontend/src/
 
 ## Known limitations
 
+- **stdin does not cross language families.** `scanf`, `cin >>` and `Scanner` are not
+  mapped to each other or to `input()`, so a C, C++ or Java program that reads input
+  usually fails once migrated. This is measured, not estimated — see the dataset note
+  above — and is the largest single source of failure.
 - The C/C++ parser covers the common procedural subset — functions, structs, simple
   classes, control flow and expressions. Templates, macros, multiple inheritance and
   pointer arithmetic are not modelled.

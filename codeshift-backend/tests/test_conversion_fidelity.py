@@ -13,7 +13,7 @@ from cross_language_system.core.dispatcher import CrossLanguageEngine
 from cross_language_system.core.type_annotator import TypeAnnotator
 from cross_language_system.parsers.python_parser import PythonParser
 from cross_language_system.core.ir_nodes import (
-    Assignment, AttributeAccess, Class, Field, Return, UnaryOp, Variable,
+    Assignment, AttributeAccess, Class, Field, Return, UnaryOp,
 )
 
 PY_CLASS = """class BankAccount:
@@ -209,7 +209,10 @@ class TestPythonToJava:
         assert "int amount" in java["code"]
 
     def test_accuracy_is_high(self, java):
-        assert java["accuracy"] > 85
+        # Model output, so this is a sanity band rather than a guarantee. The old
+        # score was inflated by a hardcoded per-language bonus; this one is
+        # predicted from measured migrations.
+        assert java["accuracy"] > 75
 
     def test_float_division_semantics(self, engine):
         result = engine.convert(PY_FUNCS, "python", "java")
