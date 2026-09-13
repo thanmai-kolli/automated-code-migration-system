@@ -29,6 +29,9 @@ class CppGenerator(CFamilyGenerator):
         if "_split(" in body:
             code += "#include <sstream>\n"
 
+        if "pow(" in body:
+            code += "#include <cmath>\n"
+
         code += "using namespace std;\n\n"
 
         if "_split(" in body:

@@ -72,7 +72,10 @@ class CGenerator(CFamilyGenerator):
     # -----------------------------------------
 
     def headers(self, program, body):
-        return "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n\n"
+        code = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
+        if "pow(" in body:
+            code += "#include <math.h>\n"
+        return code + "\n"
 
     def interpolation(self, node):
         # C has no string concatenation operator; fall back to the literal text.

@@ -407,6 +407,9 @@ class TypeAnnotator:
                 return "String"
             if expr.operator == "Div":
                 return "double"
+            if expr.operator == "Pow":
+                # int ** int stays integral in Python.
+                return "double" if "double" in (left, right) else "int"
             if "double" in (left, right):
                 return "double"
             if left == "int" or right == "int":

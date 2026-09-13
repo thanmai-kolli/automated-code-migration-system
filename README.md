@@ -235,13 +235,28 @@ codeshift-frontend/src/       pages, components, services, utils, styles
 
 ## Known limitations
 
-- The C/C++ parser covers the common procedural subset. Templates, macros, multiple
-  inheritance and pointer arithmetic are not modelled.
+Measured by probing individual constructs, not estimated. Arithmetic, control flow,
+functions, classes, stdin and f-strings migrate cleanly. The gaps are concentrated in
+two places:
+
+- **Collections and strings.** Python list/dict comprehensions, `enumerate`, `sorted`,
+  slicing, and most list/dict operations do not yet lower into the C family. Java's
+  `ArrayList`/`HashMap` and C++'s `vector` likewise do not reach C.
+- **Language-specific memory and type machinery.** C pointers, `malloc`, structs and
+  2D arrays do not reach Java or Python meaningfully; C++ templates and references do
+  not reach Java or C. These have no direct equivalent and need real lowering, not a
+  mapping.
+
+Also outstanding:
+
+- Python `def f(a, b=2)` — default arguments are dropped, so calls lose the default.
+- Nested functions are not hoisted, so they vanish in every target.
+- `try/except` does not reach Java, and has no C equivalent (the body is inlined).
+- The C/C++ parser covers the common procedural subset; macros, multiple inheritance
+  and operator overloading are not modelled.
 - Where a Python type cannot be inferred, the target falls back to `Object` (Java), a
-  `template` parameter (C++) or `int` (C, which has no generics). Every such decision is
-  reported in the semantic findings.
-- Python → C is the weakest direction: C has no strings, growable lists or exceptions, so
-  arrays get a companion `_length` variable and `try` blocks are inlined.
-- The version-upgrade engine covers a curated rule set per language, not the full
-  2to3 / JDK migration surface.
-- The corpus is 40 programs; the measured numbers describe that corpus, not all code.
+  `template` parameter (C++) or `int` (C). Each such decision is reported in the
+  semantic findings.
+- The 40-program corpus is arithmetic- and loop-heavy, so the 87/120 figure above is
+  more favourable than the construct probe. Both numbers are real; the corpus measures
+  a narrower slice.

@@ -184,6 +184,16 @@ class CFamilyGenerator:
         if isinstance(node, BinaryOp):
             left = self.expr(node.left)
             right = self.expr(node.right)
+
+            # There is no exponentiation operator in C or C++.
+            if node.operator == "Pow":
+                call = f"pow({left}, {right})"
+                integral = (
+                    self._expr_type(node.left) in (None, "int")
+                    and self._expr_type(node.right) in (None, "int")
+                )
+                return f"(int) {call}" if integral else call
+
             if node.operator == "Div" and self.source == "python":
                 left = f"(double) {left}"
             return f"{left} {ARITHMETIC.get(node.operator, '+')} {right}"

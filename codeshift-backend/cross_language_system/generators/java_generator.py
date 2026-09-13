@@ -245,8 +245,9 @@ class JavaGenerator:
             # -------- DICTIONARY HANDLING --------
             if isinstance(stmt.value, DictLiteral):
 
-                key_type = self._infer_type(stmt.value.keys[0])
-                val_type = self._infer_type(stmt.value.values[0])
+                # An empty literal carries no element to infer from.
+                key_type = self._infer_type(stmt.value.keys[0]) if stmt.value.keys else "Object"
+                val_type = self._infer_type(stmt.value.values[0]) if stmt.value.values else "Object"
 
                 # First map Python → Java
                 mapped_key = self.mapper.map(
@@ -530,19 +531,28 @@ class JavaGenerator:
 
         if isinstance(expr, BinaryOp):
 
+            left = self._generate_expr(expr.left)
+            right = self._generate_expr(expr.right)
+
+            # Java's ^ is XOR, not exponentiation.
+            if expr.operator == "Pow":
+                call = f"Math.pow({left}, {right})"
+                integral = (
+                    self._infer_type(expr.left) in ("int", "Integer")
+                    and self._infer_type(expr.right) in ("int", "Integer")
+                )
+                return f"(int) {call}" if integral else call
+
             op_map = {
                 "Add": "+",
                 "Sub": "-",
                 "Mult": "*",
                 "Div": "/",
                 "FloorDiv": "/",
-                "Mod": "%",
-                "Pow": "^"
+                "Mod": "%"
             }
 
             operator = op_map.get(expr.operator, "+")
-            left = self._generate_expr(expr.left)
-            right = self._generate_expr(expr.right)
 
             # Python's / is always float division; Java's / on two ints is not.
             if (
@@ -633,12 +643,25 @@ class JavaGenerator:
 
                 # set methods
                 "add": "add",
-                "discard": "remove"
+                "discard": "remove",
+
+                # string methods
+                "upper": "toUpperCase",
+                "lower": "toLowerCase",
+                "strip": "trim",
+                "startswith": "startsWith",
+                "endswith": "endsWith",
+                "find": "indexOf",
+                "replace": "replace",
             }
 
             java_method = method_map.get(expr.method, expr.method)
 
             args = ", ".join(self._generate_expr(a) for a in expr.args)
+
+            # len() lowers to size(), but a Java String measures with length().
+            if expr.method == "size" and self._infer_type(expr.obj) == "String":
+                return f"{self._generate_expr(expr.obj)}.length()"
 
             # Python's bare split() tokenises on any whitespace; wrapping the
             # resulting String[] keeps it indexable like every other list.
