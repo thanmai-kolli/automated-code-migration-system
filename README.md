@@ -1,0 +1,240 @@
+<div align="center">
+
+# CodeShift
+
+**Automated Code Migration System**
+
+Convert source code between Java, Python, C and C++ — or upgrade a legacy codebase to a
+modern language version — through AST-aware transformation, then score the result with
+trained ML models instead of trusting it blindly.
+
+</div>
+
+![CodeShift landing page](docs/screenshots/01-landing-hero.png)
+
+---
+
+## What it does
+
+CodeShift is built around two independent migration engines behind one Flask API and one
+React workspace.
+
+| Engine | What it does | Supported |
+| --- | --- | --- |
+| **Cross-Language** | Parses source into a language-neutral IR, regenerates it in the target language | Python ↔ Java, C ↔ C++ |
+| **Version Upgrade** | Detects the language version in use and rewrites deprecated constructs | Python → 3.12, Java → 17, C → C17, C++ → C++20 |
+
+Every run returns a **Migration Intelligence Report** — not just converted code:
+
+- **Transformation accuracy** (0–100) from a `RandomForestRegressor`
+- **Model confidence** (0–1) from a separate trained regressor
+- **Risk level + triggers** — which specific constructs are unsafe to migrate
+- **Compilation status** — the output is actually handed to `javac` / `gcc` / `g++` / `ast.parse`
+- **Semantic findings** — e.g. dynamic typing collapsed into static types
+- Token / AST / structure similarity, unified diff, and engine timing
+
+---
+
+## Architecture
+
+```
+codeshift-frontend/          React 19 + Vite + Monaco  →  3-step migration workspace
+        │  POST /api/*  (proxied by Vite in dev)
+        ▼
+codeshift-backend/           Flask API
+        ├── api/                     route blueprints
+        ├── cross_language_system/   parse → IR → semantics → generate → validate → score
+        └── version_upgrade_system/  detect version → transform → validate → risk → score
+
+automated_code_migration_system_final/   the same two engines as a standalone CLI
+```
+
+### Cross-language pipeline
+
+```
+source ─► parser ─► IR nodes ─► symbol table + type inference ─► semantic analyzer
+                                                                      │
+       score ◄── confidence/accuracy models ◄── validator ◄── generator
+```
+
+Parsers: Python via `ast`, Java via `javalang`, C/C++ via regex (C++ upgrades additionally
+use `libclang` when available, falling back to a regex transformer otherwise).
+
+---
+
+## Quick start
+
+**Prerequisites** — Python 3.10+, Node 18+. Optional but recommended for compile
+validation: `javac` on PATH (Java output), `gcc` / `g++` (C/C++ output).
+
+**Backend**
+
+```bash
+cd codeshift-backend
+python -m venv .venv && .venv\Scripts\activate    # PowerShell
+pip install -r requirements.txt
+python flask_app.py                                # http://127.0.0.1:5000
+```
+
+**Frontend** (in a second terminal)
+
+```bash
+cd codeshift-frontend
+npm install
+npm run dev                                        # http://localhost:5173
+```
+
+That's it — Vite proxies `/api` to Flask, so no CORS setup is needed in development.
+
+<details>
+<summary>Configuration</summary>
+
+| Variable | Where | Default | Purpose |
+| --- | --- | --- | --- |
+| `HOST` / `PORT` | backend | `127.0.0.1` / `5000` | bind address |
+| `FLASK_DEBUG` | backend | `0` | set `1` for auto-reload |
+| `CORS_ORIGINS` | backend | `http://localhost:5173,http://127.0.0.1:5173` | allowed origins when *not* using the Vite proxy |
+| `VITE_API_PROXY_TARGET` | frontend | `http://127.0.0.1:5000` | where the dev proxy points |
+| `VITE_API_BASE_URL` | frontend | `/api` | absolute API origin for production builds |
+
+Copy `codeshift-frontend/.env.example` to `.env` to override.
+
+</details>
+
+---
+
+## API
+
+### `POST /api/cross-language`
+
+```jsonc
+// request
+{ "code": "def add(a, b): ...", "source_language": "python", "target_language": "java" }
+
+// response
+{ "success": true, "data": {
+    "code": "...", "source": "python", "target": "java",
+    "accuracy": 56.72, "confidence": 0.67,
+    "compile_success": false, "compile_errors": [ ... ],
+    "semantic_issues": ["Dynamic typing converted to static types"],
+    "risk_score": 0, "diff_count": 12, "diff_text": "...",
+    "token_similarity": 0.71, "ast_similarity": 0.917, "structure_similarity": 0.88,
+    "timeTakenMs": 1065
+}}
+```
+
+### `POST /api/version-upgrade`
+
+```jsonc
+// request
+{ "code": "print 'hi'", "language": "python" }
+
+// response — adds detected_version, risk_level, risk_triggers, validation_status
+{ "success": true, "data": {
+    "code": "print('hi')", "engine": "Python Enterprise Engine",
+    "detected_version": "Python 2.x", "validation_status": "PASS",
+    "risk_level": "LOW", "risk_triggers": ["Python2 to Python3 print modernization"],
+    "accuracy": 99.43, "confidence": 0.922, "compile_success": true
+}}
+```
+
+`GET /` is a health check. Failures return `{ "success": false, "error": "..." }` with a
+`4xx`/`5xx` status. Request bodies are capped at 1 MB.
+
+---
+
+## Screenshots
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/05-migration-step1-mode.png" alt="Step 1 — select migration mode"><br><sub><b>1.</b> Pick cross-language or version upgrade</sub></td>
+<td width="50%"><img src="docs/screenshots/06-migration-step2-config.png" alt="Step 2 — configure languages"><br><sub><b>2.</b> Only valid language pairs are offered</sub></td>
+</tr>
+</table>
+
+**3. Migrate and read the report** — side-by-side Monaco editors, then the full intelligence report.
+
+![Python to Java migration result](docs/screenshots/08-migration-result.png)
+
+**Version upgrade** — Python 2 detected, `print` statements modernised, output validated.
+
+![Python 2 to 3 upgrade result](docs/screenshots/09-version-upgrade-result.png)
+
+<details>
+<summary>More of the landing page</summary>
+
+![Feature grid](docs/screenshots/03-landing-features.png)
+![How it works](docs/screenshots/04-landing-how-it-works.png)
+
+</details>
+
+---
+
+## ML models
+
+Four scikit-learn models ship with the repo as `.pkl` files:
+
+| Model | Task | Trained on |
+| --- | --- | --- |
+| `confidence_model.pkl` | reliability of a conversion (0–1) | `ml/confidence_training_data.csv` (500 rows) |
+| `accuracy_model.pkl` | transformation accuracy (0–100) | `ml/accuracy_training_data.csv` (500 rows) |
+| `language_model.pkl` | source-language auto-detection | generated corpus |
+| `version_confidence_model.pkl` | upgrade confidence | `core/version_training_data.csv` |
+
+Features are shared across the first two: `diff_count`, `semantic_issues`,
+`compile_success`, `risk_score`, `token_similarity`, `ast_similarity`,
+`structure_similarity`.
+
+Retrain any of them from source:
+
+```bash
+cd codeshift-backend/cross_language_system/ml
+python train_confidence_model.py
+python train_accuracy_model.py
+```
+
+> The pinned `scikit-learn` version in `requirements.txt` matches the version the models
+> were fitted with. Installing a different minor release will emit
+> `InconsistentVersionWarning` — retrain rather than ignore it.
+
+---
+
+## Repository layout
+
+```
+codeshift-backend/
+  flask_app.py                      app factory + health route
+  api/                              cross-language & version-upgrade blueprints
+  cross_language_system/
+    core/                           dispatcher, IR, symbol table, type inference,
+                                    semantic analyzer, similarity + scoring engines
+    parsers/ generators/ validators/    one module per language
+    ml/                             models, training data, training scripts
+  version_upgrade_system/
+    config.py                       target version per language
+    core/                           upgrade engine, risk scorer, change tracker
+    languages/{python,java,c,cpp}/enterprise_engine/
+                                    per-language transformer, validator, risk analyzer
+
+codeshift-frontend/src/
+  pages/          Landing, Migration
+  components/     landing/, migration/{steps,workspace,report}, layout/
+  services/       migrationService.js — the only place that talks to the API
+  utils/          language.js — label → Monaco id / file extension
+
+automated_code_migration_system_final/    standalone CLI build of both engines
+```
+
+---
+
+## Known limitations
+
+- The Java generator emits method signatures and control flow, but drops some assignment
+  bodies — `compile_success: false` on the Python → Java sample above is genuine, not a
+  display bug.
+- C and C++ parsing is regex-based in the cross-language engine; deeply templated or
+  macro-heavy code will not round-trip.
+- The version-upgrade engine covers a curated rule set per language, not the full
+  2to3 / JDK migration surface.
+- `test_success` currently mirrors syntax validation; the test-case panel is scaffolding.
+- Cross-language conversion is restricted to Python ↔ Java and C ↔ C++.

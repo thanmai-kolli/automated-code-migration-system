@@ -1,0 +1,268 @@
+// import { useState } from "react";
+// import { runCrossLanguage, runVersionUpgrade } from "../../../services/migrationService";
+// import WorkspaceHeader from "../workspace/WorkSpaceHeader";
+// import ActionToolbar from "../workspace/ActionToolbar";
+// import CodeEditor from "../workspace/CodeEditor";
+// import OutputEditor from "../workspace/OutputEditor";
+// import TestCasePanel from "../workspace/TestCasePanel";
+// import ReportPanel from "../report/ReportPanel";
+// import "../../../styles/workspace.css";
+
+// export default function WorkspaceStep({ mode, config, onBack }) {
+//   const [inputCode, setInputCode] = useState("");
+//   const [outputCode, setOutputCode] = useState("");
+//   const [testCases, setTestCases] = useState("");
+//   const [copied, setCopied] = useState(false);
+//   const [accuracy, setAccuracy] = useState(null);
+//   const [confidence, setConfidence] = useState(null);
+//   const [loading, setLoading] = useState(false);
+//   const [report, setReport] = useState(null);
+
+//   // File extension based on target language
+//   const getFileExtension = () => {
+//     switch (config.targetLang) {
+//       case "Java": return "java";
+//       case "Python": return "py";
+//       case "C": return "c";
+//       case "C++": return "cpp";
+//       default: return "txt";
+//     }
+//   };
+
+//   // Simulated Run (backend will replace this)
+//   const handleRun = async () => {
+//       if (!inputCode.trim()) return;
+
+//       setLoading(true);
+//       setOutputCode("");
+//       setAccuracy(null);
+//       setConfidence(null);
+
+//       try {
+//         let result;
+
+//           if (mode === "cross") {
+//             result = await runCrossLanguage(
+//               inputCode,
+//               config.sourceLang,
+//               config.targetLang
+//             );
+//           } else {
+//             result = await runVersionUpgrade(
+//               inputCode,
+//               config.sourceLang
+//             );
+//           }
+
+//           setOutputCode(result.code);
+//           setReport(result.report);
+//           setConfidence(result.report.confidence);
+//           setAccuracy(Math.max(100 - result.report.totalDiffChanges, 50));
+
+//       } catch (error) {
+//         console.error("Migration Error:", error);
+//         alert("Backend connection failed");
+//       }
+
+//       setLoading(false);
+//   };  
+//   const handleCopy = async () => {
+//     if (!outputCode) return;
+
+//     await navigator.clipboard.writeText(outputCode);
+//     setCopied(true);
+
+//     setTimeout(() => setCopied(false), 1500);
+//   };
+
+//   const handleDownload = () => {
+//     if (!outputCode) return;
+
+//     const blob = new Blob([outputCode], { type: "text/plain" });
+//     const link = document.createElement("a");
+//     link.href = URL.createObjectURL(blob);
+//     link.download = `converted.${getFileExtension()}`;
+//     link.click();
+//   };
+
+//   const handleFileUpload = (e) => {
+//     const file = e.target.files[0];
+//     if (!file) return;
+
+//     const reader = new FileReader();
+//     reader.onload = (event) => {
+//       setInputCode(event.target.result);
+//     };
+//     reader.readAsText(file);
+//   };
+
+//   return (
+//     <div className="migration-type-page workspace-page">
+
+//       <WorkspaceHeader
+//         mode={mode}
+//         config={config}
+//         onBack={onBack}
+//       />
+
+//       <ActionToolbar
+//         onRun={handleRun}
+//         onCopy={handleCopy}
+//         onDownload={handleDownload}
+//         copied={copied}
+//       />
+
+//       {loading && (
+//         <div className="workspace-loading">
+//           Running Migration...
+//         </div>
+//       )}
+
+//       <div className="editor-grid">
+
+//         <CodeEditor
+//           language={config.sourceLang}
+//           value={inputCode}
+//           onChange={setInputCode}
+//           onUpload={handleFileUpload}
+//         />
+
+//         <OutputEditor
+//           language={config.targetLang}
+//           value={outputCode}
+//           onChange={setOutputCode}   // Editable output
+//         />
+
+//       </div>
+
+//       <TestCasePanel
+//         value={testCases}
+//         onChange={setTestCases}
+//       />
+
+//       <ReportPanel report={report} mode={mode} />
+//     </div>
+//   );
+// }
+import { useState } from "react";
+import { runCrossLanguage, runVersionUpgrade } from "../../../services/migrationService";
+import WorkspaceHeader from "../workspace/WorkSpaceHeader";
+import ActionToolbar from "../workspace/ActionToolbar";
+import CodeEditor from "../workspace/CodeEditor";
+import OutputEditor from "../workspace/OutputEditor";
+import TestCasePanel from "../workspace/TestCasePanel";
+import ReportPanel from "../report/ReportPanel";
+import "../../../styles/workspace.css";
+
+export default function WorkspaceStep({ mode, config, onBack }) {
+  const [inputCode, setInputCode] = useState("");
+  const [outputCode, setOutputCode] = useState("");
+  const [testCases, setTestCases] = useState("");
+  const [copied, setCopied] = useState(false);
+  const [accuracy, setAccuracy] = useState(null);
+  const [confidence, setConfidence] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [report, setReport] = useState(null);
+
+  // Version-upgrade mode has no target language: output stays in the source language.
+  const outputLang = config.targetLang || config.sourceLang;
+
+  const handleRun = async () => {
+    if (!inputCode.trim()) return;
+
+    setLoading(true);
+    setOutputCode("");
+    setAccuracy(null);
+    setConfidence(null);
+    setReport(null);
+
+    try {
+      let result;
+
+      if (mode === "cross") {
+        result = await runCrossLanguage(
+          inputCode,
+          config.sourceLang,
+          config.targetLang
+        );
+      } else {
+        result = await runVersionUpgrade(
+          inputCode,
+          config.sourceLang
+        );
+      }
+
+      //Slight delay for better animation feel
+      setTimeout(() => {
+        setOutputCode(result.code);
+        setReport(result.report);
+        setConfidence(result.report.confidence);
+        setAccuracy(result.report.accuracy);
+        setLoading(false);
+      }, 400);
+    } catch (error) {
+      console.error("Migration Error:", error);
+      alert("Backend connection failed");
+      setLoading(false);
+    }
+  };
+  const handleFileUpload = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      setInputCode(event.target.result);
+    };
+    reader.readAsText(file);
+  };
+
+  return (
+    <div className="migration-type-page workspace-page">
+
+      <WorkspaceHeader
+        mode={mode}
+        config={config}
+        onBack={onBack}
+      />
+      <ActionToolbar
+        onRun={handleRun}
+        // onCopy={handleCopy}
+        // onDownload={handleDownload}
+        copied={copied}
+        loading={loading}   // 🔥 pass loading
+      />
+
+      {loading && (
+        <div className="workspace-loading">
+          🚀 Running AI Migration Engine...
+        </div>
+      )}
+
+      <div className="editor-grid">
+
+        <CodeEditor
+          language={config.sourceLang}
+          value={inputCode}
+          onChange={setInputCode}
+          onUpload={handleFileUpload}
+        />
+
+        <OutputEditor
+          language={outputLang}
+          value={outputCode}
+          loading={loading}     // 🔥 pass loading
+        />
+
+      </div>
+
+      <TestCasePanel
+        value={testCases}
+        onChange={setTestCases}
+      />
+
+      <ReportPanel report={report} mode={mode} />
+
+    </div>
+  );
+}

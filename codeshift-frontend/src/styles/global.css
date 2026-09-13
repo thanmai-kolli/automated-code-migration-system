@@ -1,0 +1,24 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background-color: #06121f;
+  color: white;
+  font-family: 'Manrope', sans-serif;
+  overflow-x: hidden;
+}
+/* GRID BACKGROUND */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, rgba(0,229,255,0.06) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(0,229,255,0.06) 1px, transparent 1px);
+  background-size: 60px 60px;
+  pointer-events: none;
+  z-index: -2;
+}

@@ -1,0 +1,18 @@
+# Python 3.10+ required.
+# scikit-learn / numpy are pinned because the bundled *.pkl models are
+# version-sensitive; loading them under a different minor release may warn or fail.
+
+Flask==3.1.2
+Flask-Cors==6.0.1
+
+scikit-learn==1.7.2
+joblib==1.5.1
+numpy==2.2.6
+pandas==2.3.1
+
+# Java source parsing (cross-language parser + Java upgrade engine)
+javalang==0.13.0
+
+# Optional: enables the libclang-backed C++ parser. Without it (or without
+# libclang on PATH) the C++ engine falls back to its regex-based transformer.
+clang==21.1.7
