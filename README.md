@@ -260,6 +260,12 @@ arguments become Java overloads, so each works in every target that supports the
   semantic findings.
 - The C/C++ parser covers the common procedural subset; macros, multiple inheritance
   and operator overloading are not modelled.
+
+---
+
+## License
+
+[MIT](LICENSE)
 - The 40-program corpus is arithmetic- and loop-heavy, so the 88/120 figure above is
   more favourable than the construct probe. Both are real; the corpus measures a
   narrower slice.
