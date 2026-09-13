@@ -13,22 +13,24 @@ class CValidator:
         if not compiler:
             return False, "⚠ gcc not found — compile validation skipped"
 
+        temp_dir = tempfile.mkdtemp()
+
         try:
-            temp_dir = tempfile.mkdtemp()
             file_path = os.path.join(temp_dir, "temp.c")
 
-            with open(file_path, "w") as f:
+            with open(file_path, "w", encoding="utf-8") as f:
                 f.write(code)
 
             result = subprocess.run(
-                [compiler, "-std=c17", file_path],
+                # Without -o the linker drops a.out/a.exe into the server's
+                # working directory, so concurrent requests overwrite one
+                # another and a locked file reads back as a compile failure.
+                [compiler, "-std=c17", file_path, "-o", os.path.join(temp_dir, "a.out")],
                 capture_output=True,
                 text=True,
-                timeout=20
+                timeout=20,
+                cwd=temp_dir
             )
-
-            os.remove(file_path)
-            os.rmdir(temp_dir)
 
             if result.returncode == 0:
                 return True, None
@@ -37,3 +39,6 @@ class CValidator:
 
         except Exception as e:
             return False, str(e)
+
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)

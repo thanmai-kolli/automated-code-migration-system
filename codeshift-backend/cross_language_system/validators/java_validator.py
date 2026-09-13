@@ -11,24 +11,20 @@ class JavaValidator:
         if not shutil.which("javac"):
             return False, "⚠ javac not found — compile validation skipped"
 
+        temp_dir = tempfile.mkdtemp()
+
         try:
-            temp_dir = tempfile.mkdtemp()
             file_path = os.path.join(temp_dir, "Converted.java")
 
-            with open(file_path, "w") as f:
+            with open(file_path, "w", encoding="utf-8") as f:
                 f.write(code)
 
             result = subprocess.run(
-                ["javac", file_path],
+                ["javac", "-encoding", "UTF-8", file_path],
                 capture_output=True,
                 text=True,
                 timeout=20
             )
-
-            # Clean up
-            for file in os.listdir(temp_dir):
-                os.remove(os.path.join(temp_dir, file))
-            os.rmdir(temp_dir)
 
             if result.returncode == 0:
                 return True, None
@@ -37,3 +33,6 @@ class JavaValidator:
 
         except Exception as e:
             return False, str(e)
+
+        finally:
+            shutil.rmtree(temp_dir, ignore_errors=True)
