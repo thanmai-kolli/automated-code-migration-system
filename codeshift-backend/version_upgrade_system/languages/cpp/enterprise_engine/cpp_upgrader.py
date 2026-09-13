@@ -4,7 +4,6 @@ from version_upgrade_system.languages.cpp.enterprise_engine.validator import Cpp
 from version_upgrade_system.languages.cpp.enterprise_engine.diff_generator import DiffGenerator
 from version_upgrade_system.languages.cpp.enterprise_engine.confidence_engine import CppVersionConfidence
 
-from .fallback_transformer import CppFallbackTransformer
 from .modern_cpp_transformer import CppModernizationTransformer
 
 try:

@@ -35,6 +35,12 @@ Every run returns a **Migration Intelligence Report** — not just converted cod
 - **Semantic findings** — e.g. dynamic typing collapsed into static types
 - Token / AST / structure similarity, unified diff, and engine timing
 
+> **The translation itself is fully deterministic.** Source is parsed to an AST,
+> lowered to an IR, type-annotated and re-emitted. No LLM or generative model is
+> involved, so the same input always produces the same output. Machine learning is
+> used only to *score* a finished conversion (accuracy and confidence) and to
+> auto-detect the source language when the caller omits it.
+
 ---
 
 ## Architecture
@@ -176,13 +182,14 @@ Copy `codeshift-frontend/.env.example` to `.env` to override.
 ```bash
 cd codeshift-backend
 pip install pytest
-python -m pytest -q          # 86 tests
+python -m pytest -q          # 98 tests
 ```
 
-Covers the Python version detector, the AST validator, indentation-preserving upgrades,
-diff/change counting, the language registry, similarity scoring, every API route
-including the 1 MB payload limit, plus conversion fidelity: parser coverage, type
-inference, generated-code content, and a compile check on all 12 language pairs.
+Covers the Python version detector, the AST validator, every Python 2 → 3 rule,
+indentation-preserving upgrades, diff/change counting, the language registry,
+similarity scoring, every API route including the 1 MB payload limit, plus conversion
+fidelity: parser coverage, type inference, generated-code content, and a compile check
+on all 12 language pairs.
 
 ```bash
 cd codeshift-frontend
@@ -291,5 +298,9 @@ automated_code_migration_system_final/    standalone CLI build of both engines
   exceptions, so arrays are emitted with a companion `_length` variable and `try`
   blocks are inlined with a comment.
 - The version-upgrade engine covers a curated rule set per language, not the full
-  2to3 / JDK migration surface.
+  2to3 / JDK migration surface. Python currently rewrites `print` statements,
+  `iteritems`/`iterkeys`/`itervalues`, `xrange`, `raw_input`, `unicode`, `basestring`,
+  `long`, `<>`, `has_key` and comma-style `except` clauses; every applied rule is
+  listed in the report's risk triggers, and a rewrite that fails to parse is discarded
+  in favour of the original.
 - `test_success` currently mirrors syntax validation; the test-case panel is scaffolding.

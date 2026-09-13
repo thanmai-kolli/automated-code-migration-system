@@ -17,25 +17,61 @@ class PythonEnterpriseUpgrader:
         self.diff = DiffGenerator()
 
     # -----------------------------------
-    # SAFE PRINT UPGRADE FUNCTION
+    # PYTHON 2 -> 3 RULES
+    #
+    # (pattern, replacement, description). Applied to whole lines, so the
+    # indentation captured by each pattern is preserved.
     # -----------------------------------
+    RULES = [
+        (r'\.iteritems\(\)', '.items()', "dict.iteritems() -> items()"),
+        (r'\.iterkeys\(\)', '.keys()', "dict.iterkeys() -> keys()"),
+        (r'\.itervalues\(\)', '.values()', "dict.itervalues() -> values()"),
+        (r'\bxrange\(', 'range(', "xrange() -> range()"),
+        (r'\braw_input\(', 'input(', "raw_input() -> input()"),
+        (r'\bbasestring\b', 'str', "basestring -> str"),
+        (r'\bunicode\(', 'str(', "unicode() -> str()"),
+        (r'\blong\(', 'int(', "long() -> int()"),
+        (r'<>', '!=', "<> -> !="),
+        (r'^(\s*)except\s+([\w.]+)\s*,\s*(\w+)\s*:', r'\1except \2 as \3:',
+         "except X, e -> except X as e"),
+        (r'(\w+)\.has_key\((.+?)\)', r'\2 in \1', "dict.has_key(k) -> k in dict"),
+    ]
+
     def safe_print_upgrade(self, code):
 
         pattern = r'^(\s*)print\s+(.*)$'
         lines = code.splitlines()
         new_lines = []
+        changed = False
 
         for line in lines:
             match = re.match(pattern, line)
             if match:
                 indent = match.group(1)
                 content = match.group(2).rstrip()
-                new_line = f'{indent}print({content})'
-                new_lines.append(new_line)
+                new_lines.append(f'{indent}print({content})')
+                changed = True
             else:
                 new_lines.append(line)
 
-        return "\n".join(new_lines)
+        return "\n".join(new_lines), changed
+
+    def _apply_rules(self, code):
+        """Run every modernization rule, reporting which ones actually fired."""
+
+        applied = []
+
+        code, printed = self.safe_print_upgrade(code)
+        if printed:
+            applied.append("Python2 to Python3 print modernization")
+
+        for pattern, replacement, description in self.RULES:
+            updated, count = re.subn(pattern, replacement, code, flags=re.MULTILINE)
+            if count:
+                code = updated
+                applied.append(description)
+
+        return code, applied
 
     def upgrade(self, code):
 
@@ -44,17 +80,23 @@ class PythonEnterpriseUpgrader:
         # --------------------------
         # Safe upgrade logic
         # --------------------------
-        upgraded = self.safe_print_upgrade(code)
+        upgraded, applied_rules = self._apply_rules(code)
 
         # --------------------------
         # Validation
         # --------------------------
         validation = self.validator.validate(upgraded)
 
+        # A rule that breaks the file is worse than no upgrade at all.
+        if not validation["compile_success"] and self.validator.validate(original)["compile_success"]:
+            upgraded = original
+            applied_rules = []
+            validation = self.validator.validate(original)
+
         # --------------------------
         # Risk Analysis
         # --------------------------
-        risk_data = self.risk.compute(original, upgraded)
+        risk_data = self.risk.compute(original, upgraded, applied_rules)
 
         # --------------------------
         # Diff Calculation

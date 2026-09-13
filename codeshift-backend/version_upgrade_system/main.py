@@ -145,7 +145,7 @@ def main():
             print("Unsupported language.")
             return
 
-    except Exception as e:
+    except Exception:
         print("\n❌ Engine execution failed:")
         traceback.print_exc()
         return

@@ -461,11 +461,8 @@ class TypeAnnotator:
                 return "List<Object>"
             return UNKNOWN
 
-        if isinstance(expr, (IndexAccess, DictAccess)):
-            container = self.infer(
-                expr.obj if isinstance(expr, IndexAccess) else expr.dictionary, scope
-            )
-            return self._element_type(container)
+        if isinstance(expr, IndexAccess):
+            return self._element_type(self.infer(expr.obj, scope))
 
         if isinstance(expr, RangeCall):
             return "List<Integer>"

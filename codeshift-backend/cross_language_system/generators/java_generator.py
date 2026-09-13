@@ -1,7 +1,6 @@
 from cross_language_system.core.ir_nodes import *
 from cross_language_system.core.symbol_table import SymbolTable
 from cross_language_system.core.type_mapper import TypeMapper
-from cross_language_system.core.type_inference import TypeInferenceEngine
 
 
 class JavaGenerator:
@@ -11,8 +10,6 @@ class JavaGenerator:
         self.target_lang = target_lang.lower()
         self.mapper = TypeMapper()
         self.symbol_table = SymbolTable()
-        self.inference_engine = TypeInferenceEngine()
-        self.function_param_types = {}
         
     def _to_wrapper(self, primitive):
 
@@ -43,7 +40,6 @@ class JavaGenerator:
     def generate(self, program):
 
         uses_input = self._program_uses_input(program)
-        self._collect_function_calls(program)
         code = "import java.util.*;\n\n"
         code += "public class Converted {\n"
 
@@ -593,22 +589,8 @@ class JavaGenerator:
             return "sc.nextLine()"
         
         if isinstance(expr, FunctionCall):
-
-            arg_types = []
-
-            for arg in expr.args:
-                arg_types.append(self._infer_type(arg))
-
-            # store argument types
-            if expr.name not in self.function_param_types:
-                self.function_param_types[expr.name] = arg_types
-
             args = ", ".join(self._generate_expr(a) for a in expr.args)
-
             return f"{expr.name}({args})"
-        
-        if isinstance(expr, DictAccess):
-            return f"{self._generate_expr(expr.dictionary)}.get({self._generate_expr(expr.key)})"
 
         if isinstance(expr, ObjectCreation):
             args = ", ".join(self._generate_expr(a) for a in (expr.arguments or []))
@@ -774,32 +756,7 @@ class JavaGenerator:
                 return True
 
         return False
-    def _collect_function_calls(self, program):
 
-        def scan(node):
-
-            if isinstance(node, FunctionCall):
-
-                arg_types = []
-
-                for arg in node.args:
-                    arg_types.append(self._infer_type(arg))
-
-                if node.name not in self.function_param_types:
-                    self.function_param_types[node.name] = arg_types
-
-            if hasattr(node, "__dict__"):
-                for value in node.__dict__.values():
-
-                    if isinstance(value, list):
-                        for item in value:
-                            scan(item)
-
-                    else:
-                        scan(value)
-
-        for node in program.body:
-            scan(node)
     def _fix_java_generics(self, type_str):
 
         replacements = {
@@ -821,31 +778,3 @@ class JavaGenerator:
             type_str = type_str.replace(k, v)
 
         return type_str
-    def _infer_list_element_type(self, func, list_name):
-
-        for stmt in func.body:
-
-            # detect append usage
-            if isinstance(stmt, ListAppend):
-
-                if isinstance(stmt.list_obj, Identifier) and stmt.list_obj.name == list_name:
-
-                    element_type = self._infer_type(stmt.value)
-
-                    return self._to_wrapper(element_type)
-
-            # detect for loop usage
-            if isinstance(stmt, ForLoop):
-
-                if isinstance(stmt.iterable, Identifier) and stmt.iterable.name == list_name:
-
-                    # inspect loop body
-                    for inner in stmt.body:
-
-                        if isinstance(inner, ListAppend):
-
-                            element_type = self._infer_type(inner.value)
-
-                            return self._to_wrapper(element_type)
-
-        return "Object"

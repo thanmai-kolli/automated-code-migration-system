@@ -23,7 +23,6 @@ class CppParser:
     def _parse_as_text(self, code):
 
         includes = []
-        globals_code = []
         blocks = []
 
         lines = code.splitlines()

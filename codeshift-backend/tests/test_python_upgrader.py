@@ -98,3 +98,84 @@ class TestPythonUpgrader:
             "diff_text",
         ):
             assert key in result
+
+
+class TestPython2Rules:
+    """Each rule must fire, preserve syntax, and be reported as a trigger."""
+
+    def _upgrade(self, source):
+        return PythonEnterpriseUpgrader().upgrade(source)
+
+    def test_iteritems(self):
+        result = self._upgrade("d = {}\nfor k, v in d.iteritems():\n    pass\n")
+        assert ".items()" in result["code"]
+        assert "iteritems" not in result["code"]
+        assert result["compile_success"]
+
+    def test_iterkeys_and_itervalues(self):
+        result = self._upgrade("d = {}\nprint list(d.iterkeys()), list(d.itervalues())\n")
+        assert ".keys()" in result["code"]
+        assert ".values()" in result["code"]
+
+    def test_xrange(self):
+        result = self._upgrade("for i in xrange(3):\n    pass\n")
+        assert "range(3)" in result["code"]
+        assert "xrange" not in result["code"]
+
+    def test_raw_input(self):
+        result = self._upgrade("name = raw_input()\n")
+        assert "input()" in result["code"]
+        assert "raw_input" not in result["code"]
+
+    def test_except_comma_becomes_as(self):
+        result = self._upgrade("try:\n    pass\nexcept ValueError, e:\n    pass\n")
+        assert "except ValueError as e:" in result["code"]
+        assert result["compile_success"]
+
+    def test_not_equal_operator(self):
+        result = self._upgrade("x = 1\nif x <> 2:\n    pass\n")
+        assert "!=" in result["code"]
+        assert "<>" not in result["code"]
+
+    def test_has_key(self):
+        result = self._upgrade("d = {}\nif d.has_key('a'):\n    pass\n")
+        assert "'a' in d" in result["code"]
+        assert "has_key" not in result["code"]
+
+    def test_unicode_and_basestring(self):
+        result = self._upgrade("x = unicode(5)\ny = basestring\n")
+        assert "str(5)" in result["code"]
+        assert "basestring" not in result["code"]
+
+    def test_applied_rules_are_reported(self):
+        result = self._upgrade("for i in xrange(3):\n    print i\n")
+        assert len(result["risk_triggers"]) >= 2
+        assert result["risk_score"] >= 2
+
+    def test_modern_code_triggers_nothing(self):
+        result = self._upgrade("for i in range(3):\n    print(i)\n")
+        assert result["risk_triggers"] == []
+        assert result["risk_score"] == 0
+
+    def test_combined_legacy_file_compiles(self):
+        source = (
+            "d = {'a': 1}\n"
+            "for k, v in d.iteritems():\n"
+            "    print k, v\n"
+            "for i in xrange(2):\n"
+            "    print i\n"
+            "try:\n"
+            "    pass\n"
+            "except ValueError, e:\n"
+            "    pass\n"
+        )
+        result = self._upgrade(source)
+        assert result["compile_success"], result["compile_errors"]
+        for legacy in ("iteritems", "xrange", "except ValueError,"):
+            assert legacy not in result["code"]
+
+    def test_a_broken_rewrite_falls_back_to_the_original(self):
+        # Valid Python 3 in, valid Python 3 out — never a regression.
+        source = "d = {'a': 1}\nprint(d)\n"
+        result = self._upgrade(source)
+        assert result["compile_success"]

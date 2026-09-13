@@ -50,34 +50,11 @@ class CrossLanguageEngine:
         compile_success, compile_errors = validator.validate(generated_code)
         compile_flag = 1 if compile_success else 0
 
-        # 🔹 Collect structural metrics
-        num_object_types = generated_code.count("Object")
-
-        num_generic_types = (
-            generated_code.count("List<") +
-            generated_code.count("Map<") +
-            generated_code.count("Set<")
-        )
-
-        num_loops = generated_code.count("for (") + generated_code.count("while (")
-
-        num_conditionals = generated_code.count("if (")
         # Generate diff
         diff_data = DiffGenerator().generate(code, generated_code)
-        source_lines = len(code.splitlines())
-        diff_ratio = diff_data["total_changes"] / max(source_lines, 1)
         token_similarity = compute_token_similarity(code, generated_code)
         ast_similarity = compute_ast_similarity(code, generated_code)
         structure_similarity = compute_structure_similarity(code, generated_code)
-        # metrics = {
-        #     "compile_success": compile_flag,
-        #     "num_object_types": num_object_types,
-        #     "num_generic_types": num_generic_types,
-        #     "num_loops": num_loops,
-        #     "num_conditionals": num_conditionals,
-        #     "diff_ratio": diff_ratio,
-        #     "semantic_issues": len(semantic_issues)
-        # }
         metrics = {
             "diff_count": diff_data["total_changes"],
             "semantic_issues": len(semantic_issues),

@@ -175,10 +175,8 @@ class CFamilyGenerator:
         if isinstance(node, TernaryOp):
             return f"{self.expr(node.condition)} ? {self.expr(node.if_true)} : {self.expr(node.if_false)}"
 
-        if isinstance(node, (IndexAccess, DictAccess)):
-            container = node.obj if isinstance(node, IndexAccess) else node.dictionary
-            index = node.index if isinstance(node, IndexAccess) else node.key
-            return f"{self.expr(container)}[{self.expr(index)}]"
+        if isinstance(node, IndexAccess):
+            return f"{self.expr(node.obj)}[{self.expr(node.index)}]"
 
         if isinstance(node, TypeCast):
             target = {"int": "int", "float": "double", "bool": "bool"}.get(node.target_type)

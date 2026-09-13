@@ -45,16 +45,6 @@ class PythonGenerator:
 
         return code or "pass\n"
 
-    def _generate_node(self, node):
-
-        if isinstance(node, Class):
-            return self._generate_class(node)
-
-        if isinstance(node, Function):
-            return self._generate_function(node)
-
-        return ""
-
     def _generate_class(self, cls):
 
         header = f"class {cls.name}({cls.base}):\n" if cls.base else f"class {cls.name}:\n"
@@ -189,9 +179,7 @@ class PythonGenerator:
         
         if isinstance(stmt, TryCatch):
 
-            exception = self.exception_map.get(
-                stmt.exception_type, "Exception"
-            )
+            exception = self.exception_map.get(stmt.exception_type, "Exception")
             code = f"{tab}try:\n"
             if not stmt.try_body:
                 code += f"{tab}    pass\n"
@@ -199,7 +187,8 @@ class PythonGenerator:
                 for s in stmt.try_body:
                     code += self._generate_statement(s, indent + 1)
 
-            code += f"{tab}except Exception as {stmt.catch_var}:\n"
+            binding = f" as {stmt.catch_var}" if stmt.catch_var else ""
+            code += f"{tab}except {exception}{binding}:\n"
             if not stmt.catch_body:
                 code += f"{tab}    pass\n"
             else:
@@ -297,9 +286,6 @@ class PythonGenerator:
 
         if isinstance(expr, IndexAccess):
             return f"{self._generate_expr(expr.obj)}[{self._generate_expr(expr.index)}]"
-
-        if isinstance(expr, DictAccess):
-            return f"{self._generate_expr(expr.dictionary)}[{self._generate_expr(expr.key)}]"
 
         if isinstance(expr, BooleanOp):
             op_map = {

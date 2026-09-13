@@ -1,7 +1,6 @@
-from flask import Blueprint, request, jsonify, Response
+from flask import Blueprint, request, jsonify
 from werkzeug.exceptions import HTTPException
 import traceback
-import json
 
 from cross_language_system.main_cross import run_cross_language_api
 from cross_language_system.core.language_normalizer import LanguageNormalizer

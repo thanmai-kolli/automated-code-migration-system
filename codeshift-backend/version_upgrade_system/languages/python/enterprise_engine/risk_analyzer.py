@@ -1,19 +1,14 @@
 class PythonRiskAnalyzer:
 
-    def compute(self, original, upgraded):
+    def compute(self, original, upgraded, applied_rules=None):
 
-        risk_score = 0
-        triggers = []
+        triggers = list(applied_rules or [])
+        risk_score = len(triggers)
 
         original_lines = len(original.splitlines())
         upgraded_lines = len(upgraded.splitlines())
 
         diff_ratio = abs(original_lines - upgraded_lines) / max(original_lines, 1)
-
-        # Example modernization checks
-        if "print " in original and "print(" in upgraded:
-            risk_score += 1
-            triggers.append("Python2 to Python3 print modernization")
 
         if diff_ratio > 0.5:
             risk_score += 3

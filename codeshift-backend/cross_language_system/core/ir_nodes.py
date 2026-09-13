@@ -36,11 +36,6 @@ class DictLiteral:
         self.keys = keys
         self.values = values
 
-class DictAccess:
-    def __init__(self, dictionary, key):
-        self.dictionary = dictionary
-        self.key = key
-
 class ListAppend:
     def __init__(self, list_obj, value):
         self.list_obj = list_obj
@@ -50,20 +45,11 @@ class SetLiteral:
     def __init__(self, elements):
         self.elements = elements
 
-class ObjectCreation:
-    def __init__(self, class_name):
-        self.class_name = class_name
-        
 class DictPut:
     def __init__(self, dictionary, key, value):
         self.dictionary = dictionary
         self.key = key
         self.value = value
-
-class WhileLoop:
-    def __init__(self, condition, body):
-        self.condition = condition
-        self.body = body
 
 class RangeCall:
     def __init__(self, args):
@@ -241,11 +227,6 @@ class ObjectCreation(Expression):
     def __init__(self, class_name, arguments=None):
         self.class_name = class_name
         self.arguments = arguments or []
-
-class CollectionCreation(Expression):
-    def __init__(self, collection_type, elements=None):
-        self.collection_type = collection_type
-        self.elements = elements or []
 
 
 class MethodCall:
