@@ -78,6 +78,16 @@ class CFamilyGenerator:
         # A class name passes through; C uses the struct typedef.
         return name
 
+    def declared_type(self, name):
+        """Type for a slot that has no initializer to deduce from.
+
+        ``auto`` is only legal where the compiler can see an initializer, so a
+        data member or a parameter must fall back to the untyped pointer that
+        both languages already use for unresolved values.
+        """
+        rendered = self.type_of(name)
+        return "void*" if rendered == "auto" else rendered
+
     @staticmethod
     def _unbox(name):
         return {"Integer": "int", "Double": "double", "Boolean": "bool",

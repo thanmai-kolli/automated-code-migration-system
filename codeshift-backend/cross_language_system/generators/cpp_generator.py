@@ -96,7 +96,7 @@ class CppGenerator(CFamilyGenerator):
         code = f"class {cls.name}{base} {{\npublic:\n"
 
         for field in cls.fields:
-            code += f"    {self.type_of(field.field_type)} {field.name};\n"
+            code += f"    {self.declared_type(field.field_type)} {field.name};\n"
 
         if cls.fields:
             code += "\n"
@@ -116,7 +116,7 @@ class CppGenerator(CFamilyGenerator):
 
         params = []
         for p in func.params:
-            rendered = self.type_of(func.param_types.get(p, "Object"))
+            rendered = self.declared_type(func.param_types.get(p, "Object"))
             # C++ supports default arguments directly.
             default = func.defaults.get(p)
             suffix = f" = {self.expr(default)}" if default is not None else ""
@@ -125,7 +125,7 @@ class CppGenerator(CFamilyGenerator):
 
         if owner:
             for field in owner.fields:
-                self.scope[field.name] = self.type_of(field.field_type)
+                self.scope[field.name] = self.declared_type(field.field_type)
 
         signature = ", ".join(params)
         return_type = self.type_of(func.return_type)

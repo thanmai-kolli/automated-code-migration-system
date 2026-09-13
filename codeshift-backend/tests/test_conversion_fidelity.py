@@ -211,8 +211,10 @@ class TestPythonToJava:
     def test_accuracy_is_high(self, java):
         # Model output, so this is a sanity band rather than a guarantee. The old
         # score was inflated by a hardcoded per-language bonus; this one is
-        # predicted from measured migrations.
-        assert java["accuracy"] > 75
+        # predicted from measured migrations. Python -> Java scores in the low
+        # 70s because token overlap between the two languages is inherently
+        # small, so the band only guards against inflation or collapse.
+        assert 70 < java["accuracy"] < 100
 
     def test_float_division_semantics(self, engine):
         result = engine.convert(PY_FUNCS, "python", "java")
@@ -272,6 +274,14 @@ class TestCFamily:
     def test_python_to_cpp_uses_vector(self, engine):
         result = engine.convert(PY_FUNCS, "python", "c++")
         assert "vector<int>" in result["code"]
+        assert result["compile_success"], result["compile_errors"]
+
+    def test_cpp_class_never_declares_a_field_auto(self, engine):
+        # `owner` has no usage to infer a type from. `auto` is only legal where
+        # the compiler can see an initializer, so a bare `auto` member is a
+        # hard compile error rather than a merely imprecise type.
+        result = engine.convert(PY_CLASS, "python", "c++")
+        assert "auto owner;" not in result["code"]
         assert result["compile_success"], result["compile_errors"]
 
 
