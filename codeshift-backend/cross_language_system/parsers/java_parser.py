@@ -299,7 +299,7 @@ class JavaParser:
 
                 if expr.qualifier:
                     return MethodCall(
-                        expr.qualifier,
+                        Identifier(expr.qualifier),
                         expr.member,
                         [self._handle_expression(a) for a in expr.arguments]
                     )

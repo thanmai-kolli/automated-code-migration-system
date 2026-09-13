@@ -117,7 +117,10 @@ class CppGenerator(CFamilyGenerator):
         params = []
         for p in func.params:
             rendered = self.type_of(func.param_types.get(p, "Object"))
-            params.append(f"{rendered} {p}")
+            # C++ supports default arguments directly.
+            default = func.defaults.get(p)
+            suffix = f" = {self.expr(default)}" if default is not None else ""
+            params.append(f"{rendered} {p}{suffix}")
             self.scope[p] = rendered
 
         if owner:

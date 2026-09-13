@@ -102,7 +102,7 @@ class Function(IRNode):
 
     def __init__(self, name, params=None, body=None, return_type="void",
                  is_constructor=False, is_static=True, param_types=None,
-                 owner=None):
+                 owner=None, defaults=None):
         self.name = name
         self.params = params or []
         self.body = body or []
@@ -112,6 +112,7 @@ class Function(IRNode):
         self.is_static = is_static
         self.param_types = param_types or {}
         self.owner = owner
+        self.defaults = defaults or {}
 
 
 # ------------------------------------------------------------

@@ -159,10 +159,10 @@ cannot score well by recognising a program it saw in another target language:
 
 | | model | baseline |
 | --- | --- | --- |
-| accuracy — MAE | **4.78** | 40.03 |
-| accuracy — R² | **0.875** | −0.009 |
-| confidence — accuracy | **0.975** | 0.725 |
-| confidence — ROC AUC | **0.963** | 0.500 |
+| accuracy — MAE | **7.77** | 39.34 |
+| accuracy — R² | **0.772** | −0.013 |
+| confidence — accuracy | **0.958** | 0.733 |
+| confidence — ROC AUC | **0.936** | 0.500 |
 
 ```bash
 cd codeshift-backend
@@ -171,9 +171,9 @@ python -m cross_language_system.ml.build_dataset   # compiles and runs everythin
 python -m cross_language_system.ml.train_models
 ```
 
-**Measured engine quality:** 90 of 120 migrations compile and 87 preserve behaviour.
-Compilation dominates the feature importances, because on this corpus 87 of the 90 that
-compile are also correct.
+**Measured engine quality:** 93 of 120 migrations compile and 88 preserve behaviour.
+Compilation dominates the feature importances, because on this corpus almost everything
+that compiles is also correct.
 
 ---
 
@@ -235,28 +235,31 @@ codeshift-frontend/src/       pages, components, services, utils, styles
 
 ## Known limitations
 
-Measured by probing individual constructs, not estimated. Arithmetic, control flow,
-functions, classes, stdin and f-strings migrate cleanly. The gaps are concentrated in
-two places:
+Measured by probing 32 individual constructs across every direction, not estimated.
+Python → Java is the strongest path (13 of 18 constructs); C is the weakest target.
 
-- **Collections and strings.** Python list/dict comprehensions, `enumerate`, `sorted`,
-  slicing, and most list/dict operations do not yet lower into the C family. Java's
-  `ArrayList`/`HashMap` and C++'s `vector` likewise do not reach C.
-- **Language-specific memory and type machinery.** C pointers, `malloc`, structs and
-  2D arrays do not reach Java or Python meaningfully; C++ templates and references do
-  not reach Java or C. These have no direct equivalent and need real lowering, not a
-  mapping.
+**Still missing**
 
-Also outstanding:
+- **`enumerate`, `sorted`, string slicing, and dict iteration** (`for k, v in d.items()`)
+  are not lowered anywhere.
+- **Nested functions** are not hoisted, so they vanish in every target.
+- **C as a target** has no growable list, map or string type, so collections, f-strings
+  and `try/except` do not survive. C++ handles all three.
+- **C pointers, `malloc` and structs** do not reach Java or Python, and **C++ templates
+  and references** do not reach Java or C. These need real lowering, not a mapping.
+- Java's `?:` and `switch` reach Python but not the C family.
 
-- Python `def f(a, b=2)` — default arguments are dropped, so calls lose the default.
-- Nested functions are not hoisted, so they vanish in every target.
-- `try/except` does not reach Java, and has no C equivalent (the body is inlined).
-- The C/C++ parser covers the common procedural subset; macros, multiple inheritance
-  and operator overloading are not modelled.
+**Handled by rewriting rather than mapping** — list comprehensions desugar into a loop
+plus appends, `a, b = input().split()` becomes N token reads, and Python default
+arguments become Java overloads, so each works in every target that supports the pieces.
+
+**Other caveats**
+
 - Where a Python type cannot be inferred, the target falls back to `Object` (Java), a
   `template` parameter (C++) or `int` (C). Each such decision is reported in the
   semantic findings.
-- The 40-program corpus is arithmetic- and loop-heavy, so the 87/120 figure above is
-  more favourable than the construct probe. Both numbers are real; the corpus measures
-  a narrower slice.
+- The C/C++ parser covers the common procedural subset; macros, multiple inheritance
+  and operator overloading are not modelled.
+- The 40-program corpus is arithmetic- and loop-heavy, so the 88/120 figure above is
+  more favourable than the construct probe. Both are real; the corpus measures a
+  narrower slice.

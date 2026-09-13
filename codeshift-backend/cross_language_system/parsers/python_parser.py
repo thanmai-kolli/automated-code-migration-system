@@ -52,6 +52,14 @@ class PythonParser:
 
         body = self._handle_body(node.body)
 
+        # Defaults bind to the trailing parameters.
+        defaults = {}
+        if node.args.defaults:
+            tail = [a.arg for a in node.args.args][-len(node.args.defaults):]
+            for param, default in zip(tail, node.args.defaults):
+                if param in params:
+                    defaults[param] = self._handle_expr(default)
+
         func = Function(
             node.name,
             params,
@@ -60,6 +68,7 @@ class PythonParser:
             is_static=not is_method,
             param_types=param_types,
             owner=owner,
+            defaults=defaults,
         )
 
         if node.returns is not None:
@@ -274,6 +283,14 @@ class PythonParser:
 
     def _handle_assign(self, node):
 
+        # A comprehension has no equivalent in any target, but the loop it
+        # stands for does, so desugar it before anything else sees it.
+        if isinstance(node.value, (ast.ListComp, ast.SetComp)) and len(node.targets) == 1:
+            if isinstance(node.targets[0], ast.Name):
+                desugared = self._desugar_comprehension(node.targets[0].id, node.value)
+                if desugared is not None:
+                    return desugared
+
         value = self._handle_expr(node.value)
         statements = []
 
@@ -335,6 +352,29 @@ class PythonParser:
             and not value.args
             and isinstance(value.obj, Input)
         )
+
+    def _desugar_comprehension(self, name, node):
+        """[f(i) for i in xs if c]  ->  name = []; for i in xs: if c: name.append(f(i))"""
+
+        if len(node.generators) != 1:
+            return None
+
+        generator = node.generators[0]
+
+        if generator.is_async or not isinstance(generator.target, ast.Name):
+            return None
+
+        body = [ListAppend(Identifier(name), self._handle_expr(node.elt))]
+
+        for condition in reversed(generator.ifs):
+            body = [IfStatement(self._handle_expr(condition), body)]
+
+        empty = SetLiteral() if isinstance(node, ast.SetComp) else ArrayLiteral()
+
+        return [
+            Variable(name, value=empty),
+            ForLoop(generator.target.id, self._handle_expr(generator.iter), body),
+        ]
 
     def _assign_to(self, target_node, value):
 

@@ -221,6 +221,10 @@ class CFamilyGenerator:
             return f"({target}) {inner}" if target else inner
 
         if isinstance(node, ObjectCreation):
+            # Java's collection classes become plain initialisers.
+            if node.class_name in ("ArrayList", "LinkedList", "Vector",
+                                   "HashMap", "TreeMap", "HashSet", "TreeSet"):
+                return "{}"
             args = ", ".join(self.expr(a) for a in (node.arguments or []))
             return f"{node.class_name}({args})" if self.cpp else f"{node.class_name}_new({args})"
 
@@ -240,6 +244,16 @@ class CFamilyGenerator:
         if isinstance(node, ArrayLiteral):
             elements = ", ".join(self.expr(e) for e in node.elements)
             return "{" + elements + "}"
+
+        if isinstance(node, SetLiteral):
+            return "{" + ", ".join(self.expr(e) for e in node.elements) + "}"
+
+        if isinstance(node, DictLiteral):
+            pairs = ", ".join(
+                "{" + f"{self.expr(k)}, {self.expr(v)}" + "}"
+                for k, v in zip(node.keys, node.values)
+            )
+            return "{" + pairs + "}"
 
         if isinstance(node, StringInterpolation):
             return self.interpolation(node)
@@ -282,6 +296,19 @@ class CFamilyGenerator:
 
         if node.method == "size":
             return f"{obj}.size()" if self.cpp else f"{obj}_length"
+
+        if self.cpp:
+            # Java collection calls have operator or member equivalents in C++.
+            if node.method in ("add", "append", "push_back"):
+                return f"{obj}.push_back({args})"
+            if node.method == "get" and len(node.args) == 1:
+                return f"{obj}[{self.expr(node.args[0])}]"
+            if node.method == "put" and len(node.args) == 2:
+                return f"{obj}[{self.expr(node.args[0])}] = {self.expr(node.args[1])}"
+            if node.method in ("containsKey", "contains"):
+                return f"{obj}.count({args})"
+            if node.method in ("isEmpty",):
+                return f"{obj}.empty()"
 
         return f"{obj}.{node.method}({args})" if self.cpp else f"{node.method}({obj}{', ' + args if args else ''})"
 

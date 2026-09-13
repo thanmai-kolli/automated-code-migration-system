@@ -107,8 +107,10 @@ class TypeAnnotator:
             self.call_sites = {}
             global_scope = Scope()
 
-            for node in program.body:
-                self._annotate_node(node, global_scope)
+            # Two sweeps: `xs = []` is only typed once a later append is seen.
+            for _ in range(2):
+                for node in program.body:
+                    self._annotate_node(node, global_scope)
 
             self._apply_call_sites()
 
@@ -174,6 +176,10 @@ class TypeAnnotator:
 
         for param, declared in list(usage.items()):
             scope.set(param, self._normalize(declared) if declared else UNKNOWN)
+
+        # A default value is direct evidence of the parameter's type.
+        for param, default in (func.defaults or {}).items():
+            scope.set(param, widen(scope.get(param), self.infer(default, scope)))
 
         # Locals must be resolved first: a parameter's type is often revealed by
         # what it is combined with (`total += s` only constrains s once total is
@@ -361,6 +367,14 @@ class TypeAnnotator:
                 if not current or current in (UNKNOWN, "List<Object>"):
                     scope.set(stmt.list_obj.name, f"List<{element}>")
 
+        elif isinstance(stmt, DictPut):
+            if isinstance(stmt.dictionary, Identifier):
+                key = self._boxed(self.infer(stmt.key, scope))
+                value = self._boxed(self.infer(stmt.value, scope))
+                current = scope.get(stmt.dictionary.name)
+                if not current or current in (UNKNOWN, "Map<Object, Object>"):
+                    scope.set(stmt.dictionary.name, f"Map<{key}, {value}>")
+
         elif isinstance(stmt, Function):
             self._annotate_function(stmt, Scope(scope))
 
@@ -459,7 +473,16 @@ class TypeAnnotator:
             return f"Map<{self._boxed(key)}, {self._boxed(value)}>"
 
         if isinstance(expr, ObjectCreation):
-            return expr.class_name
+            # A collection constructor describes a container, not a user class.
+            return {
+                "ArrayList": "List<Object>",
+                "LinkedList": "List<Object>",
+                "Vector": "List<Object>",
+                "HashMap": "Map<Object, Object>",
+                "TreeMap": "Map<Object, Object>",
+                "HashSet": "Set<Object>",
+                "TreeSet": "Set<Object>",
+            }.get(expr.class_name, expr.class_name)
 
         if isinstance(expr, FunctionCall):
             self._record_call(expr.name, [self.infer(a, scope) for a in expr.args])

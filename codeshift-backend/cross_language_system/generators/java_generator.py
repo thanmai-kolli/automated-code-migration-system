@@ -5,6 +5,19 @@ from cross_language_system.core.type_mapper import TypeMapper
 
 class JavaGenerator:
 
+    # Python exception names have no meaning to javac.
+    EXCEPTIONS = {
+        "ZeroDivisionError": "ArithmeticException",
+        "ValueError": "IllegalArgumentException",
+        "TypeError": "ClassCastException",
+        "IndexError": "IndexOutOfBoundsException",
+        "KeyError": "NoSuchElementException",
+        "AttributeError": "NullPointerException",
+        "IOError": "java.io.IOException",
+        "OSError": "java.io.IOException",
+        "Exception": "Exception",
+    }
+
     def __init__(self, source_lang, target_lang):
         self.source_lang = source_lang.lower()
         self.target_lang = target_lang.lower()
@@ -164,6 +177,28 @@ class JavaGenerator:
 
         code += f"{tab}}}\n\n"
 
+        # Java has no default arguments, so each one becomes an overload that
+        # forwards to the full signature.
+        if func.defaults and not func.is_constructor:
+            required = [p for p in func.params if p not in func.defaults]
+            optional = [p for p in func.params if p in func.defaults]
+
+            for count in range(len(optional)):
+                kept = required + optional[:count]
+                signature = ", ".join(
+                    f"{self._java_type(func.param_types.get(p, 'Object'))} {p}" for p in kept
+                )
+                forwarded = ", ".join(
+                    kept + [self._generate_expr(func.defaults[p]) for p in optional[count:]]
+                )
+                modifier = "public" if owner else "public static"
+                returns = "" if func.return_type == "void" else "return "
+                code += (
+                    f"{tab}{modifier} {self._java_type(func.return_type)} {func.name}({signature}) {{\n"
+                    f"{tab}    {returns}{func.name}({forwarded});\n"
+                    f"{tab}}}\n\n"
+                )
+
         return code
 
     # -------------------------------------------------
@@ -224,7 +259,7 @@ class JavaGenerator:
             return f"{tab}{self._generate_expr(stmt.target)} {op} {self._generate_expr(stmt.value)};\n"
 
         if isinstance(stmt, TryCatch):
-            exception = stmt.exception_type or "Exception"
+            exception = self.EXCEPTIONS.get(stmt.exception_type, stmt.exception_type or "Exception")
             code = f"{tab}try {{\n"
             for s in stmt.try_body:
                 code += self._generate_statement(s, indent + 1)
