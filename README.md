@@ -53,9 +53,10 @@ codeshift-backend/           Flask API
         ├── api/                     route blueprints
         ├── cross_language_system/   parse → IR → semantics → generate → validate → score
         └── version_upgrade_system/  detect version → transform → validate → risk → score
-
-automated_code_migration_system_final/   the same two engines as a standalone CLI
 ```
+
+Both engines also run standalone as interactive terminal tools, from `codeshift-backend/`:
+`python -m cross_language_system.main_cross` and `python -m version_upgrade_system.main`.
 
 ### Cross-language pipeline
 
@@ -271,7 +272,7 @@ codeshift-backend/
     ml/                             models, training data, training scripts
   version_upgrade_system/
     config.py                       target version per language
-    core/                           upgrade engine, risk scorer, change tracker
+    core/                           upgrade engine, risk scorer, confidence model
     languages/{python,java,c,cpp}/enterprise_engine/
                                     per-language transformer, validator, risk analyzer
 
@@ -280,8 +281,6 @@ codeshift-frontend/src/
   components/     landing/, migration/{steps,workspace,report}, layout/
   services/       migrationService.js — the only place that talks to the API
   utils/          language.js — label → Monaco id / file extension
-
-automated_code_migration_system_final/    standalone CLI build of both engines
 ```
 
 ---
