@@ -18,6 +18,16 @@ COMPOUND_OPS = {
     "+=": "Add", "-=": "Sub", "*=": "Mult", "/=": "Div", "%=": "Mod",
 }
 
+# Scanner reads map onto the IR's stdin node rather than a generic method call.
+SCANNER_READS = {
+    "nextInt": "int",
+    "nextLong": "int",
+    "nextDouble": "double",
+    "nextFloat": "double",
+    "next": "token",
+    "nextLine": "String",
+}
+
 
 class JavaParser:
 
@@ -69,9 +79,7 @@ class JavaParser:
         body = []
         if node.body:
             for stmt in node.body:
-                parsed = self._handle_statement(stmt)
-                if parsed:
-                    body.append(parsed)
+                self._collect(body, self._handle_statement(stmt))
 
         modifiers = getattr(node, "modifiers", None) or set()
 
@@ -110,6 +118,14 @@ class JavaParser:
 
     # ---------------- STATEMENTS ----------------
 
+    @staticmethod
+    def _collect(target, parsed):
+        """_handle_statement may return several nodes for one declaration."""
+        if isinstance(parsed, list):
+            target.extend(p for p in parsed if p is not None)
+        elif parsed is not None:
+            target.append(parsed)
+
     def _handle_statement(self, stmt):
 
         # RETURN
@@ -118,21 +134,30 @@ class JavaParser:
 
         # VARIABLE DECLARATION
         if isinstance(stmt, javalang.tree.LocalVariableDeclaration):
-            decl = stmt.declarators[0]
-            return Variable(
-                decl.name,
-                "auto",
-                self._handle_expression(decl.initializer)
-            )
+
+            declared = self._type_name(stmt.type)
+
+            # A Scanner is Java plumbing for stdin; the IR models reads directly.
+            if declared == "Scanner":
+                return None
+
+            declarations = [
+                Variable(
+                    d.name,
+                    declared,
+                    self._handle_expression(d.initializer) if d.initializer else None,
+                )
+                for d in stmt.declarators
+            ]
+
+            return declarations[0] if len(declarations) == 1 else declarations
         # TRY-CATCH
         # TRY-CATCH
         if isinstance(stmt, javalang.tree.TryStatement):
 
             try_body = []
             for inner_stmt in stmt.block:
-                parsed = self._handle_statement(inner_stmt)
-                if parsed:
-                    try_body.append(parsed)
+                self._collect(try_body, self._handle_statement(inner_stmt))
 
             catch = stmt.catches[0]
             catch_var = catch.parameter.name
@@ -140,9 +165,7 @@ class JavaParser:
 
             catch_body = []
             for inner_stmt in catch.block:
-                parsed = self._handle_statement(inner_stmt)
-                if parsed:
-                    catch_body.append(parsed)
+                self._collect(catch_body, self._handle_statement(inner_stmt))
 
             return TryCatch(
                 try_body,
@@ -160,26 +183,18 @@ class JavaParser:
 
                 if isinstance(stmt.then_statement, javalang.tree.BlockStatement):
                     for s in stmt.then_statement.statements:
-                        parsed = self._handle_statement(s)
-                        if parsed:
-                            body.append(parsed)
+                        self._collect(body, self._handle_statement(s))
                 else:
-                    parsed = self._handle_statement(stmt.then_statement)
-                    if parsed:
-                        body.append(parsed)
+                    self._collect(body, self._handle_statement(stmt.then_statement))
 
             else_body = []
             if stmt.else_statement:
 
                 if isinstance(stmt.else_statement, javalang.tree.BlockStatement):
                     for s in stmt.else_statement.statements:
-                        parsed = self._handle_statement(s)
-                        if parsed:
-                            else_body.append(parsed)
+                        self._collect(else_body, self._handle_statement(s))
                 else:
-                    parsed = self._handle_statement(stmt.else_statement)
-                    if parsed:
-                        else_body.append(parsed)
+                    self._collect(else_body, self._handle_statement(stmt.else_statement))
 
             return IfStatement(condition, body, else_body)
 
@@ -197,13 +212,9 @@ class JavaParser:
                 body = []
                 if isinstance(stmt.body, javalang.tree.BlockStatement):
                     for s in stmt.body.statements:
-                        parsed = self._handle_statement(s)
-                        if parsed:
-                            body.append(parsed)
+                        self._collect(body, self._handle_statement(s))
                 else:
-                    parsed = self._handle_statement(stmt.body)
-                    if parsed:
-                        body.append(parsed)
+                    self._collect(body, self._handle_statement(stmt.body))
 
                 return ForLoop(var_name, iterable, body)
 
@@ -225,13 +236,9 @@ class JavaParser:
                 body = []
                 if isinstance(stmt.body, javalang.tree.BlockStatement):
                     for s in stmt.body.statements:
-                        parsed = self._handle_statement(s)
-                        if parsed:
-                            body.append(parsed)
+                        self._collect(body, self._handle_statement(s))
                 else:
-                    parsed = self._handle_statement(stmt.body)
-                    if parsed:
-                        body.append(parsed)
+                    self._collect(body, self._handle_statement(stmt.body))
 
                 return ForLoop(var_name, iterable, body)
     
@@ -285,6 +292,11 @@ class JavaParser:
             # Method call: nums.add(5)
             if isinstance(expr, javalang.tree.MethodInvocation):
 
+                if expr.member in ("println", "print") and expr.qualifier in ("System.out", "System.err"):
+                    return PrintStatement(
+                        [self._handle_expression(a) for a in expr.arguments]
+                    )
+
                 if expr.qualifier:
                     return MethodCall(
                         expr.qualifier,
@@ -319,9 +331,7 @@ class JavaParser:
                     if isinstance(s, javalang.tree.BreakStatement):
                         continue
 
-                    parsed = self._handle_statement(s)
-                    if parsed:
-                        body.append(parsed)
+                    self._collect(body, self._handle_statement(s))
 
                 cases.append(SwitchCase(value, body))
 
@@ -337,13 +347,9 @@ class JavaParser:
             body = []
             if isinstance(stmt.body, javalang.tree.BlockStatement):
                 for s in stmt.body.statements:
-                    parsed = self._handle_statement(s)
-                    if parsed:
-                        body.append(parsed)
+                    self._collect(body, self._handle_statement(s))
             else:
-                parsed = self._handle_statement(stmt.body)
-                if parsed:
-                    body.append(parsed)
+                self._collect(body, self._handle_statement(stmt.body))
 
             return WhileLoop(condition, body)
 
@@ -420,6 +426,9 @@ class JavaParser:
 
         # METHOD CALL
         if isinstance(expr, javalang.tree.MethodInvocation):
+
+            if expr.member in SCANNER_READS:
+                return Input(None, SCANNER_READS[expr.member])
 
             if expr.member == "equals" and expr.qualifier:
                 return BooleanOp(

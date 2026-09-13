@@ -105,6 +105,25 @@ class CGenerator(CFamilyGenerator):
             return f'{tab}printf("{fmt}", {", ".join(values)});\n'
         return f'{tab}printf("{fmt}");\n'
 
+    SCANF_FORMATS = {"int": "%d", "double": "%lf", "char*": "%s"}
+
+    def render_entry_call(self, cls, method):
+        args = ", ".join("NULL, 0" if str(t).startswith("List<") else "0"
+                         for t in (method.param_types.get(p) for p in method.params))
+        return f"{cls.name}_{method.name}({args});"
+
+    def read_into(self, target, rendered_type, indent, value_type):
+        tab = "    " * indent
+        if rendered_type == "char*":
+            # A char* has no storage yet, so read into a fixed buffer.
+            return (
+                f"{tab}static char _buf_{target}[256];\n"
+                f'{tab}scanf("%255s", _buf_{target});\n'
+                f"{tab}{target} = _buf_{target};\n"
+            )
+        fmt = self.SCANF_FORMATS.get(rendered_type, "%d")
+        return f'{tab}scanf("{fmt}", &{target});\n'
+
     def _static_type(self, expr):
         if isinstance(expr, Constant):
             if isinstance(expr.value, bool):

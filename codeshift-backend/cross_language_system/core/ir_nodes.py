@@ -22,8 +22,22 @@ class PrintStatement:
         self.args = args
 
 class Input:
-    def __init__(self, prompt=None):
+    """A read from stdin.
+
+    value_type distinguishes the two shapes every language has: reading a whole
+    line as text (Python's input(), Scanner.nextLine) versus reading one
+    whitespace-delimited token of a given type (scanf, cin >>, Scanner.nextInt).
+    None means the type is not known syntactically and the annotator resolves it
+    from the assignment target.
+    """
+
+    def __init__(self, prompt=None, value_type="String"):
         self.prompt = prompt
+        self.value_type = value_type
+
+    @property
+    def reads_line(self):
+        return self.value_type == "String"
 
 class TypeCast:
     def __init__(self, target_type, value):

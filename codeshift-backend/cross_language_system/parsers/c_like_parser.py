@@ -147,7 +147,9 @@ class CLikeParser:
                 continue
 
             declaration = self._parse_top_level_declaration()
-            if declaration is not None:
+            if isinstance(declaration, list):
+                body.extend(declaration)
+            elif declaration is not None:
                 body.append(declaration)
             elif not self.at_end():
                 self.index += 1
@@ -402,7 +404,10 @@ class CLikeParser:
 
         while not self.at_end() and self.value() != "}":
             statement = self._parse_statement()
-            if statement is not None:
+            # One scanf or cin chain expands into several reads.
+            if isinstance(statement, list):
+                body.extend(s for s in statement if s is not None)
+            elif statement is not None:
                 body.append(statement)
 
         self.accept("}")
@@ -453,8 +458,14 @@ class CLikeParser:
         if token in ("cout", "std") and "cout" in (self.value(), self.value(2)):
             return self._parse_cout()
 
+        if token in ("cin", "std") and "cin" in (self.value(), self.value(2)):
+            return self._parse_cin()
+
         if token == "printf":
             return self._parse_printf()
+
+        if token == "scanf":
+            return self._parse_scanf()
 
         # Declaration?
         if self._looks_like_type():
@@ -479,21 +490,32 @@ class CLikeParser:
         if declared is None or self.peek()[0] != "name":
             return None
 
-        name = self.next()[1]
+        declarations = []
 
-        # Array declaration: int values[] = {1, 2, 3};
-        if self.accept("["):
-            while not self.at_end() and self.value() != "]":
-                self.index += 1
-            self.accept("]")
-            declared = f"List<{self._box(declared)}>"
+        # int n, i, total;  -> one Variable per name
+        while True:
 
-        value = None
-        if self.accept("="):
-            value = self._parse_initializer()
+            name = self.next()[1]
+            element_type = declared
+
+            if self.accept("["):
+                while not self.at_end() and self.value() != "]":
+                    self.index += 1
+                self.accept("]")
+                element_type = f"List<{self._box(declared)}>"
+
+            value = None
+            if self.accept("="):
+                value = self._parse_initializer()
+
+            declarations.append(Variable(name, element_type, value))
+
+            if not self.accept(",") or self.peek()[0] != "name":
+                break
 
         self._skip_to_semicolon()
-        return Variable(name, declared, value)
+
+        return declarations[0] if len(declarations) == 1 else declarations
 
     def _parse_initializer(self):
 
@@ -585,6 +607,60 @@ class CLikeParser:
 
         self.accept(";")
         return PrintStatement(args)
+
+    def _parse_cin(self):
+        """cin >> a >> b  ->  one read per target."""
+
+        while self.value() in ("std", "::"):
+            self.index += 1
+        self.index += 1  # cin
+
+        reads = []
+        while self.accept(">>"):
+            target = self._parse_postfix()
+            # The type comes from the variable's declaration; the annotator fills it.
+            reads.append(Assignment(target, Input(None, None)))
+
+        self.accept(";")
+
+        return reads or None
+
+    SCANF_TYPES = {"d": "int", "i": "int", "u": "int", "ld": "int",
+                   "f": "double", "lf": "double", "g": "double", "s": "String"}
+
+    def _parse_scanf(self):
+        """scanf("%d %d", &a, &b)  ->  one typed read per target."""
+
+        self.index += 1
+        self.expect("(")
+
+        arguments = []
+        while not self.at_end() and self.value() != ")":
+            if self.accept(","):
+                continue
+            if self.accept("&"):
+                continue
+            arguments.append(self._parse_expression())
+
+        self.accept(")")
+        self.accept(";")
+
+        if not arguments:
+            return None
+
+        specifiers = []
+        if isinstance(arguments[0], Constant) and isinstance(arguments[0].value, str):
+            specifiers = re.findall(r"%\w*([a-zA-Z])", arguments[0].value)
+            targets = arguments[1:]
+        else:
+            targets = arguments
+
+        reads = []
+        for index, target in enumerate(targets):
+            letter = specifiers[index] if index < len(specifiers) else "d"
+            reads.append(Assignment(target, Input(None, self.SCANF_TYPES.get(letter, "int"))))
+
+        return reads or None
 
     def _parse_printf(self):
 

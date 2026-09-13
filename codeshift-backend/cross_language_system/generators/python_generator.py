@@ -17,9 +17,11 @@ class PythonGenerator:
     def generate(self, program):
 
         self.symbol_table = SymbolTable()
+        self.uses_tokens = False
         blocks = []
         main_statements = []
         entry_class = None
+        entry_function = None
 
         for node in program.body:
 
@@ -30,6 +32,8 @@ class PythonGenerator:
 
             elif isinstance(node, Function):
                 blocks.append(self._generate_function(node))
+                if node.name == "main":
+                    entry_function = node
 
             else:
                 main_statements.append(node)
@@ -40,10 +44,27 @@ class PythonGenerator:
             body = "".join(self._generate_statement(s, 1) for s in main_statements)
             code += "\n\nif __name__ == '__main__':\n" + (body or "    pass\n")
 
+        elif entry_function is not None:
+            # A C-family source keeps its entry point as a plain main().
+            args = ", ".join("None" for _ in entry_function.params)
+            code += f"\n\nif __name__ == '__main__':\n    main({args})\n"
+
         elif entry_class:
             code += f"\n\nif __name__ == '__main__':\n    {entry_class}.main([])\n"
 
-        return code or "pass\n"
+        code = code or "pass\n"
+
+        # Prepended last: only now is it known whether any token read was emitted.
+        if self.uses_tokens:
+            code = (
+                "import sys\n\n"
+                "_tokens = iter(sys.stdin.read().split())\n"
+                "def _read_token(): return next(_tokens)\n"
+                "def _read_int(): return int(next(_tokens))\n"
+                "def _read_float(): return float(next(_tokens))\n\n"
+            ) + code
+
+        return code
 
     def _generate_class(self, cls):
 
@@ -136,6 +157,10 @@ class PythonGenerator:
 
             # Skip Scanner object creation
             if isinstance(stmt.value, ObjectCreation) and stmt.value.class_name == "Scanner":
+                return ""
+
+            # A bare C-style declaration carries no value to assign.
+            if stmt.value is None:
                 return ""
 
             return f"{tab}{stmt.name} = {self._generate_expr(stmt.value)}\n"
@@ -313,6 +338,15 @@ class PythonGenerator:
             return f"{cast.get(expr.target_type, 'str')}({self._generate_expr(expr.value)})"
 
         if isinstance(expr, Input):
+            # Token reads need a shared stream: scanf/cin/Scanner do not consume
+            # a whole line each, so input() per value would misread the input.
+            if expr.value_type in ("int", "double", "token"):
+                self.uses_tokens = True
+                return {
+                    "int": "_read_int()",
+                    "double": "_read_float()",
+                }.get(expr.value_type, "_read_token()")
+
             prompt = self._generate_expr(expr.prompt) if expr.prompt else ""
             return f"input({prompt})"
 

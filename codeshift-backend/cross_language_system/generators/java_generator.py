@@ -307,15 +307,22 @@ class JavaGenerator:
                     prompt_text = self._generate_expr(stmt.value.prompt)
                     prompt_code = f"{tab}System.out.print({prompt_text});\n"
 
-                self.symbol_table.register_variable(stmt.name, "String")
+                declared = {"int": "int", "double": "double"}.get(stmt.value.value_type, "String")
+                self.symbol_table.register_variable(stmt.name, declared)
 
-                return prompt_code + f"{tab}String {stmt.name} = sc.nextLine();\n"
+                return prompt_code + f"{tab}{declared} {stmt.name} = {self._generate_expr(stmt.value)};\n"
 
             # The annotator already resolved this declaration's type.
             java_type = self._fix_java_generics(self._java_type(stmt.var_type))
 
             # Check if variable already declared
             existing_type = self.symbol_table.lookup(stmt.name)
+
+            if stmt.value is None:
+                if existing_type:
+                    return ""
+                self.symbol_table.register_variable(stmt.name, java_type)
+                return f"{tab}{java_type} {stmt.name};\n"
 
             if existing_type:
                 # Reassignment
@@ -586,7 +593,11 @@ class JavaGenerator:
             return f"new ArrayList<{element_type}>(Arrays.asList({elements}))"
                 
         if isinstance(expr, Input):
-            return "sc.nextLine()"
+            return {
+                "int": "sc.nextInt()",
+                "double": "sc.nextDouble()",
+                "token": "sc.next()",
+            }.get(expr.value_type, "sc.nextLine()")
         
         if isinstance(expr, FunctionCall):
             args = ", ".join(self._generate_expr(a) for a in expr.args)

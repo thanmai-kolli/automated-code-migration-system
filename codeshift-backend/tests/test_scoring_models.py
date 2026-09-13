@@ -85,9 +85,15 @@ class TestDataset:
         assert (data["risk_score"] == expected).all()
 
     def test_labels_are_not_all_the_same(self, data):
-        # A degenerate dataset would make the metrics meaningless.
+        # A degenerate dataset would make the metrics meaningless. Partial
+        # scores are not required: a migration usually works on every input or
+        # none of them, so behaviour_score is often just {0, 100}.
         assert data["correct"].nunique() == 2
-        assert data["behaviour_score"].nunique() > 2
+        assert data["behaviour_score"].nunique() >= 2
+
+    def test_both_classes_are_well_represented(self, data):
+        share = data["correct"].mean()
+        assert 0.1 < share < 0.95, f"class balance is degenerate: {share:.2f}"
 
     def test_features_vary(self, data):
         for column in ("diff_count", "token_similarity", "ast_similarity"):

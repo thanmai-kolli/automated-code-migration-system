@@ -314,7 +314,15 @@ class TypeAnnotator:
             stmt.var_type = scope.get(stmt.name) or UNKNOWN
 
         elif isinstance(stmt, Assignment):
+            # cin >> x carries no type; take it from what is being written to.
+            if isinstance(stmt.value, Input) and stmt.value.value_type is None:
+                stmt.value.value_type = self.infer(stmt.target, scope)
+
             value_type = self.infer(stmt.value, scope)
+
+            if isinstance(stmt.target, Identifier):
+                scope.set(stmt.target.name, widen(scope.get(stmt.target.name), value_type))
+
             if isinstance(stmt.target, AttributeAccess) and isinstance(stmt.target.obj, SelfRef):
                 if self.current_class:
                     fields = self.classes.setdefault(self.current_class, {})
@@ -418,7 +426,7 @@ class TypeAnnotator:
             return self._normalize(expr.target_type)
 
         if isinstance(expr, Input):
-            return "String"
+            return self._normalize(expr.value_type) if expr.value_type else UNKNOWN
 
         if isinstance(expr, ArrayLiteral):
             if not expr.elements:
@@ -497,6 +505,7 @@ class TypeAnnotator:
             "boolean": "boolean",
             "str": "String",
             "string": "String",
+            "token": "String",
             "list": "List<Object>",
             "dict": "Map<Object, Object>",
             "set": "Set<Object>",

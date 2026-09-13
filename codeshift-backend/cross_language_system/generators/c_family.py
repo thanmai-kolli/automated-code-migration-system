@@ -53,6 +53,7 @@ class CFamilyGenerator:
             "bool": "bool" if self.cpp else "int",
             "boolean": "bool" if self.cpp else "int",
             "str": "string" if self.cpp else "char*",
+            "token": "string" if self.cpp else "char*",
             "String": "string" if self.cpp else "char*",
         }
 
@@ -125,6 +126,11 @@ class CFamilyGenerator:
         if user_main:
             for stmt in user_main.body:
                 body += self.statement(stmt, 1)
+        else:
+            # A class-based source keeps its entry point as a static method.
+            entry = self.entry_call(classes)
+            if entry:
+                body += f"    {entry}\n"
         for stmt in top_level:
             body += self.statement(stmt, 1)
         body += "    return 0;\n}\n"
@@ -133,6 +139,18 @@ class CFamilyGenerator:
         return self.headers(program, body) + body
 
     def headers(self, program, body):
+        raise NotImplementedError
+
+    def entry_call(self, classes):
+        """Statement that invokes a class-based entry point, if there is one."""
+
+        for cls in classes:
+            for method in cls.methods:
+                if method.name == "main":
+                    return self.render_entry_call(cls, method)
+        return None
+
+    def render_entry_call(self, cls, method):
         raise NotImplementedError
 
     # ------------------------------------------------------------
@@ -271,6 +289,20 @@ class CFamilyGenerator:
         if stmt is None or isinstance(stmt, Pass):
             return ""
 
+        # Reading stdin is a statement in C and C++, not an expression.
+        if isinstance(stmt, Variable) and isinstance(stmt.value, Input):
+            declared = stmt.var_type if stmt.var_type not in (None, "auto") else stmt.value.value_type
+            rendered = self.type_of(declared)
+            already = self.scope.get(stmt.name)
+            self.scope[stmt.name] = rendered
+            prefix = "" if already else f"{tab}{rendered} {stmt.name};\n"
+            return prefix + self.read_into(stmt.name, rendered, indent, stmt.value.value_type)
+
+        if isinstance(stmt, Assignment) and isinstance(stmt.value, Input):
+            target = self.expr(stmt.target)
+            rendered = self.scope.get(target) or self.type_of(stmt.value.value_type)
+            return self.read_into(target, rendered, indent, stmt.value.value_type)
+
         if isinstance(stmt, Break):
             return f"{tab}break;\n"
 
@@ -284,10 +316,17 @@ class CFamilyGenerator:
 
         if isinstance(stmt, Variable):
             declared = self.scope.get(stmt.name)
+            rendered = self.type_of(stmt.var_type)
+
+            if stmt.value is None:
+                if declared:
+                    return ""
+                self.scope[stmt.name] = rendered
+                return f"{tab}{rendered} {stmt.name};\n"
+
             value = self.expr(stmt.value)
             if declared:
                 return f"{tab}{stmt.name} = {value};\n"
-            rendered = self.type_of(stmt.var_type)
             self.scope[stmt.name] = rendered
             return f"{tab}{rendered} {stmt.name} = {value};\n"
 
@@ -368,6 +407,9 @@ class CFamilyGenerator:
         return code + f"{tab}}}\n"
 
     def print_statement(self, stmt, indent):
+        raise NotImplementedError
+
+    def read_into(self, target, rendered_type, indent, value_type):
         raise NotImplementedError
 
     def try_catch(self, stmt, indent):

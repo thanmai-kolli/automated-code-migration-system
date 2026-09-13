@@ -282,6 +282,15 @@ class PythonParser:
             # a, b = 1, 2
             if isinstance(target_node, (ast.Tuple, ast.List)):
 
+                # a, b = input().split() is N whitespace-delimited reads, which
+                # every target language expresses directly.
+                if self._is_split_of_input(value):
+                    for element in target_node.elts:
+                        statements.append(
+                            self._assign_to(element, Input(None, "token"))
+                        )
+                    continue
+
                 literal = (
                     node.value.elts
                     if isinstance(node.value, (ast.Tuple, ast.List))
@@ -317,6 +326,15 @@ class PythonParser:
             return None
 
         return statements[0] if len(statements) == 1 else statements
+
+    @staticmethod
+    def _is_split_of_input(value):
+        return (
+            isinstance(value, MethodCall)
+            and value.method == "split"
+            and not value.args
+            and isinstance(value.obj, Input)
+        )
 
     def _assign_to(self, target_node, value):
 
@@ -444,6 +462,9 @@ class PythonParser:
                 return Input(args[0] if args else None)
 
             if name in self.BUILTIN_CASTS and args:
+                # int(input()) is a typed token read, not a cast over a line.
+                if isinstance(args[0], Input) and args[0].reads_line:
+                    return Input(args[0].prompt, {"int": "int", "float": "double"}.get(name, "String"))
                 return TypeCast(self.BUILTIN_CASTS[name], args[0])
 
             if name == "range":

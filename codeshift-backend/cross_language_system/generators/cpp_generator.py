@@ -73,6 +73,17 @@ class CppGenerator(CFamilyGenerator):
         pieces = ' << " " << '.join(self.expr(a) for a in stmt.args)
         return f"{tab}cout << {pieces} << endl;\n"
 
+    def read_into(self, target, rendered_type, indent, value_type):
+        tab = "    " * indent
+        # Only a whole-line read uses getline; a token read must stop at whitespace.
+        if value_type == "String":
+            return f"{tab}getline(cin, {target});\n"
+        return f"{tab}cin >> {target};\n"
+
+    def render_entry_call(self, cls, method):
+        args = ", ".join("{}" for _ in method.params)
+        return f"{cls.name}::{method.name}({args});"
+
     def render_class(self, cls):
 
         previous = self.current_class
@@ -124,7 +135,8 @@ class CppGenerator(CFamilyGenerator):
         if func.is_constructor and owner:
             code = f"{prefix}{tab}{owner.name}({signature}) {{\n"
         else:
-            code = f"{prefix}{tab}{return_type} {func.name}({signature}) {{\n"
+            modifier = "static " if owner and func.is_static else ""
+            code = f"{prefix}{tab}{modifier}{return_type} {func.name}({signature}) {{\n"
 
         for stmt in func.body:
             code += self.statement(stmt, indent + 1)
