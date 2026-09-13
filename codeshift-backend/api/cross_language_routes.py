@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify, Response
+from werkzeug.exceptions import HTTPException
 import traceback
 import json
 
@@ -50,6 +51,9 @@ def cross_language():
             "success": True,
             "data": result
         })
+
+    except HTTPException:
+        raise
 
     except Exception:
         traceback.print_exc()

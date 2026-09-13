@@ -1,4 +1,5 @@
 import { BrowserRouter } from "react-router-dom";
+import { Toaster } from "react-hot-toast";
 import AppRoutes from "./routes/AppRoutes";
 import Navbar from "./components/layout/Navbar";
 import { MigrationProvider } from "./context/MigrationContext";
@@ -12,6 +13,12 @@ export default function App() {
       <MigrationProvider>
         <Navbar />
         <AppRoutes />
+        <Toaster
+          position="bottom-right"
+          toastOptions={{
+            style: { background: "#0d1b26", color: "#d6dde3", border: "1px solid #1d3547" },
+          }}
+        />
       </MigrationProvider>
     </BrowserRouter>
   );

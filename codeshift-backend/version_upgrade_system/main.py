@@ -1,114 +1,3 @@
-# import sys
-# import os
-# import json
-
-# from core.upgrade_engine import UpgradeEngine
-# from core.language_detector import LanguageDetector
-
-
-# def read_code_from_file(file_path):
-#     try:
-#         with open(file_path, "r", encoding="utf-8") as f:
-#             return f.read()
-#     except Exception as e:
-#         print(f"❌ Error reading file: {e}")
-#         sys.exit(1)
-
-
-# def read_code_from_input():
-#     print("Paste your code below (finish with CTRL+D on Linux/Mac or CTRL+Z on Windows):\n")
-#     return sys.stdin.read()
-
-
-# def print_result(result):
-
-#     if "error" in result:
-#         print("\n❌ ERROR:")
-#         print(result["error"])
-#         return
-
-#     print("\n" + "=" * 60)
-#     print("UPGRADED CODE")
-#     print("=" * 60)
-#     print(result["upgraded_code"])
-
-#     print("\n" + "=" * 60)
-#     print("UPGRADE REPORT")
-#     print("=" * 60)
-
-#     report = result["report"]
-
-#     print(f"Language            : {report['language']}")
-#     print(f"Detected Version    : {report['detected_version']}")
-#     print(f"Target Version      : {report['target_version']}")
-#     print(f"Changes Applied     : {report['changes']}")
-#     print(f"Compile Success     : {report['compile_success']}")
-#     print(f"Compile Errors      : {report['compile_errors']}")
-#     print(f"Risk Score          : {report['risk_score']}")
-#     print(f"Risk Level          : {report['risk_level']}")
-#     print(f"Validation Status   : {report['validation_status']}")
-#     print("=" * 60)
-
-
-# def main():
-
-#     print("==============================================")
-#     print("      VERSION UPGRADE ENGINE (CLI MODE)")
-#     print("==============================================")
-
-#     engine = UpgradeEngine()
-#     detector = LanguageDetector()
-
-#     choice = input("\nChoose input method:\n1. File\n2. Manual Paste\nEnter choice (1/2): ").strip()
-
-#     if choice == "1":
-#         file_path = input("Enter file path: ").strip()
-
-#         if not os.path.exists(file_path):
-#             print("❌ File does not exist.")
-#             return
-
-#         code = read_code_from_file(file_path)
-
-#         # Auto detect from file extension
-#         extension = os.path.splitext(file_path)[1]
-
-#         if extension == ".py":
-#             language = "python"
-#         elif extension == ".java":
-#             language = "java"
-#         elif extension == ".c":
-#             language = "c"
-#         elif extension in [".cpp", ".cc", ".cxx"]:
-#             language = "cpp"
-#         else:
-#             language = detector.detect(code)
-
-#     elif choice == "2":
-#         code = read_code_from_input()
-#         language = input("Enter language (python/java/c/cpp) or leave blank for auto-detect: ").strip()
-
-#         if not language:
-#             language = detector.detect(code)
-
-#     else:
-#         print("❌ Invalid choice.")
-#         return
-
-#     if language == "unknown":
-#         print("❌ Could not detect language.")
-#         return
-
-#     print(f"\n🔍 Detected Language: {language}")
-
-#     result = engine.upgrade(code, language)
-
-#     print_result(result)
-
-
-# if __name__ == "__main__":
-#     main()
-
 import time
 import traceback
 from version_upgrade_system.core.upgrade_engine import UpgradeEngine
@@ -121,10 +10,6 @@ from cross_language_system.core.accuracy_engine import AccuracyEngine
 # Read multi-line input
 # ------------------------------------------------------------
 def read_code():
-    # print("\nPaste your code below.")
-    # print("Finish with CTRL+Z then ENTER (Windows)")
-    # print("or CTRL+D (Linux/Mac)\n")
-    # return sys.stdin.read()
     print("\nEnter your code (type END on a new line to finish):\n")
 
     lines = []
@@ -293,23 +178,6 @@ if __name__ == "__main__":
 # ------------------------------------------------------------
 # API ENTRY (For Flask)
 # ------------------------------------------------------------
-# def run_version_upgrade_api(code, language):
-
-#     engine = UpgradeEngine()
-
-#     if not code or not code.strip():
-#         return {"error": "No code provided."}
-
-#     if language not in ["python", "java", "cpp", "c"]:
-#         return {"error": "Unsupported language."}
-
-#     try:
-#         result = engine.upgrade(code, language)
-#     except Exception:
-#         traceback.print_exc()
-#         return {"error": "Engine execution failed."}
-
-#     return result
 def run_version_upgrade_api(code, language):
 
     engine = UpgradeEngine()

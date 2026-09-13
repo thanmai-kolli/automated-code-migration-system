@@ -1,19 +1,3 @@
-# class ConfidenceEngine:
-#
-#     def calculate(self, compile_success, risk_score, change_count):
-#
-#         if not compile_success:
-#             return 0.0
-#
-#         score = 100
-#         score -= risk_score * 5
-#
-#         if change_count > 40:
-#             score -= 10
-#
-#         return max(0, round(score, 2))
-
-
 from version_upgrade_system.core.base_confidence_engine import BaseVersionConfidenceEngine
 
 

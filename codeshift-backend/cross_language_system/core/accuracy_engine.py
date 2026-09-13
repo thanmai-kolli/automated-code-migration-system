@@ -15,23 +15,6 @@ class AccuracyEngine:
 
         self.model = joblib.load(model_path)
 
-    # def predict(self, features):
-
-    #     vector = [[
-    #         features["diff_count"],
-    #         features["semantic_issues"],
-    #         features["compile_success"],
-    #         features["risk_score"],
-    #         features["token_similarity"],
-    #         features["ast_similarity"],
-    #         features["structure_similarity"]
-    #     ]]
-
-    #     score = self.model.predict(vector)[0]
-
-    #     score = max(min(score, 100), 0)
-
-    #     return round(float(score), 2)
     def predict(self, features, source=None, target=None):
 
         X = [[

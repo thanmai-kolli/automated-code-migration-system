@@ -1,4 +1,5 @@
 from flask import Blueprint, request, jsonify
+from werkzeug.exceptions import HTTPException
 import traceback
 from version_upgrade_system.main import run_version_upgrade_api
 
@@ -35,6 +36,9 @@ def version_upgrade():
             "success": True,
             "data": result
         })
+
+    except HTTPException:
+        raise
 
     except Exception:
         traceback.print_exc()

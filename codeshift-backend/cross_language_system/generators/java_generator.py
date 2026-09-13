@@ -31,62 +31,6 @@ class JavaGenerator:
     # ENTRY POINT
     # -------------------------------------------------
 
-    # def generate(self, program):
-
-    #     code = "import java.util.*;\n\n"
-    #     code += "public class Converted {\n"
-    #     code += "    static Scanner sc = new Scanner(System.in);\n\n"
-
-    #     function_names = []
-    #     self.function_returns = {}
-
-    #     for node in program.body:
-    #         code += self._generate_node(node)
-
-    #         if isinstance(node, Function):
-    #             function_names.append(node.name)
-
-    #     # # Add main method automatically
-    #     # if function_names:
-    #     #     # Prefer calling function without parameters
-    #     #     for node in program.body:
-    #     #         if isinstance(node, Function) and len(node.params) == 0:
-    #     #             first_function = node.name
-    #     #             break
-    #     #     else:
-    #     #         first_function = function_names[-1]
-
-    #     # code += f"""
-    #     #     public static void main(String[] args) {{
-    #     #         {first_function}();
-    #     #     }}
-    #     # """
-    #     # Add main method automatically
-    #     if function_names:
-    #         for node in program.body:
-    #             if isinstance(node, Function) and len(node.params) == 0:
-    #                 first_function = node.name
-    #                 break
-    #         else:
-    #             first_function = function_names[-1]
-
-    #         main_call = f"{first_function}();"
-    #     else:
-    #         # No functions defined — no automatic call
-    #         main_call = "// No functions to call"
-
-    #     code += f"""
-    #         public static void main(String[] args) {{
-    #             {main_call}
-    #         }}
-    #     """
-    #     code += "}\n"
-
-    #     return code
-    # -------------------------------------------------
-# ENTRY POINT
-# -------------------------------------------------
-
     def generate(self, program):
 
         uses_input = self._program_uses_input(program)

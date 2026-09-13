@@ -8,6 +8,8 @@ Convert source code between Java, Python, C and C++ — or upgrade a legacy code
 modern language version — through AST-aware transformation, then score the result with
 trained ML models instead of trusting it blindly.
 
+[![CI](https://github.com/thanmai-kolli/automated-code-migration-system/actions/workflows/ci.yml/badge.svg)](https://github.com/thanmai-kolli/automated-code-migration-system/actions/workflows/ci.yml)
+
 </div>
 
 ![CodeShift landing page](docs/screenshots/01-landing-hero.png)
@@ -143,6 +145,28 @@ Copy `codeshift-frontend/.env.example` to `.env` to override.
 
 ---
 
+## Tests
+
+```bash
+cd codeshift-backend
+pip install pytest
+python -m pytest -q          # 40 tests
+```
+
+Covers the Python version detector, the AST validator, indentation-preserving upgrades,
+diff/change counting, the language registry, similarity scoring, and every API route
+including the 1 MB payload limit.
+
+```bash
+cd codeshift-frontend
+npm run lint
+npm run build
+```
+
+Both suites run on every push and pull request — see [ci.yml](.github/workflows/ci.yml).
+
+---
+
 ## Screenshots
 
 <table>
@@ -205,6 +229,7 @@ python train_accuracy_model.py
 codeshift-backend/
   flask_app.py                      app factory + health route
   api/                              cross-language & version-upgrade blueprints
+  tests/                            pytest suite (engines + API routes)
   cross_language_system/
     core/                           dispatcher, IR, symbol table, type inference,
                                     semantic analyzer, similarity + scoring engines

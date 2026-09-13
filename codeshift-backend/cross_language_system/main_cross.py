@@ -83,57 +83,6 @@ if __name__ == "__main__":
 # ------------------------------------------------------------
 # API ENTRY (For Flask)
 # ------------------------------------------------------------
-# def run_cross_language_api(code, source=None, target=None):
-
-#     engine = CrossLanguageEngine()
-
-#     if not code or not code.strip():
-#         return {"error": "No code provided."}
-
-#     # Auto-detect if source not provided
-#     if not source:
-#         detector = MLLanguageDetector()
-#         source = detector.predict(code)
-
-#     if not LanguageRegistry.is_supported(source):
-#         return {"error": f"Unsupported source language: {source}"}
-
-#     if not target:
-#         return {"error": "Target language is required."}
-
-#     if not LanguageRegistry.is_supported(target):
-#         return {"error": f"Unsupported target language: {target}"}
-
-#     try:
-#         result = engine.convert(code, source, target)
-#     except Exception as e:
-#         traceback.print_exc()
-#         return {"error": "Engine execution failed."}
-
-#     return result
-# 
-# def run_cross_language_api(code, source=None, target=None):
-
-#     engine = CrossLanguageEngine()
-
-#     if not code or not code.strip():
-#         return {"error": "No code provided."}
-
-#     if not source:
-#         detector = MLLanguageDetector()
-#         source = detector.predict(code)
-
-#     source = LanguageRegistry.normalize(source)
-#     target = LanguageRegistry.normalize(target)
-
-#     if not LanguageRegistry.is_supported(source):
-#         return {"error": f"Unsupported source language: {source}"}
-
-#     if not target:
-#         return {"error": "Target language is required."}
-
-#     if not LanguageRegistry.is_supported(target):
-#         return {"error": f"Unsupported target language: {target}"}
 def run_cross_language_api(code, source=None, target=None):
 
     engine = CrossLanguageEngine()

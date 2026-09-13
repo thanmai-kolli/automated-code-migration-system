@@ -1,8 +1,5 @@
 export default function ActionToolbar({
   onRun,
-  onCopy,
-  onDownload,
-  copied,
   loading
 }) {
   return (
@@ -15,10 +12,6 @@ export default function ActionToolbar({
       >
         {loading ? <div className="loader"></div> : "Run Migration"}
       </button>
-
-      {/* <button className="btn-secondary" onClick={onCopy}>
-        {copied ? "Copied ✓" : "Copy Output"}
-      </button> */}
 
     </div>
   );

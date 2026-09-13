@@ -104,20 +104,6 @@ class CppModernizationTransformer:
 
 
     # -------------------------------------------------
-    # index loop → range loop
-    # -------------------------------------------------
-    # def _modernize_loops(self, code):
-
-    #     pattern = r"for\s*\(\s*int\s+\w+\s*=\s*0\s*;\s*\w+\s*<\s*(\w+)\.size\(\)\s*;\s*\w+\+\+\s*\)"
-
-    #     return re.sub(
-    #         pattern,
-    #         r"for (auto& item : \1)",
-    #         code
-    #     )
-
-
-    # -------------------------------------------------
     # iterator → auto
     # -------------------------------------------------
     def _modernize_iterators(self, code):

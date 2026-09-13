@@ -12,6 +12,7 @@ export function MigrationProvider({ children }) {
   );
 }
 
+// eslint-disable-next-line react-refresh/only-export-components -- hook lives with its context; HMR cost is negligible here
 export function useMigration() {
   return useContext(MigrationContext);
 }

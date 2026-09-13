@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 
 export default function HowItWorks() {
@@ -60,6 +60,15 @@ function StepCard({ number, icon, title, text }) {
   const [visible, setVisible] = useState(false);
   const [count, setCount] = useState(0);
 
+  const animateNumber = useCallback(() => {
+    let start = 0;
+    const interval = setInterval(() => {
+      start++;
+      setCount(start);
+      if (start >= number) clearInterval(interval);
+    }, 150);
+  }, [number]);
+
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => {
@@ -74,16 +83,7 @@ function StepCard({ number, icon, title, text }) {
     if (ref.current) observer.observe(ref.current);
 
     return () => observer.disconnect();
-  }, []);
-
-  const animateNumber = () => {
-    let start = 0;
-    const interval = setInterval(() => {
-      start++;
-      setCount(start);
-      if (start >= number) clearInterval(interval);
-    }, 150);
-  };
+  }, [animateNumber]);
 
   return (
     <div
