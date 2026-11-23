@@ -20,7 +20,7 @@ language version — then verify the result actually compiles and behaves the sa
 | Engine | Does | Covers |
 | --- | --- | --- |
 | **Cross-Language** | Parses to a neutral IR, infers types across the whole program, regenerates | all 12 ordered pairs of Python, Java, C, C++ |
-| **Version Upgrade** | Detects the version in use and rewrites deprecated constructs | Python → 3.12, Java → 17, C → C17, C++ → C++20 |
+| **Version Upgrade** | Detects the version in use and applies rewrite rules, keeping each one only if the program still compiles (and passes your tests) | Python → 3.12, Java → 17, C → C17, C++ → C++20 |
 
 Every run returns a **Migration Intelligence Report**: predicted accuracy and
 confidence, risk triggers, real compiler output, semantic findings, token/AST/structure
@@ -29,6 +29,8 @@ similarity, a unified diff, and timing.
 > The translation is **fully deterministic** — parse, lower to IR, type-annotate,
 > re-emit. No LLM is involved, so the same input always gives the same output. Machine
 > learning only *scores* a finished migration and auto-detects the source language.
+> A construct that cannot be translated faithfully is **refused with an explanation**
+> instead of being approximated.
 
 ---
 
@@ -40,7 +42,7 @@ codeshift-frontend/   React 19 + Vite + Monaco   →   3-step workspace
         ▼
 codeshift-backend/    Flask API
         ├── cross_language_system/   parse → IR → types → generate → validate → score
-        └── version_upgrade_system/  detect → transform → validate → risk → score
+        └── version_upgrade_system/  detect → candidate rules → compile/test gate per rule → report
 ```
 
 The **type annotator** is what makes statically typed targets work. Python and C carry
@@ -49,6 +51,10 @@ resolves every parameter, field, local and return type — from literals, from u
 (`amount > self.balance` ⇒ numeric, `total += s` ⇒ `s` is `total`'s type), from
 call-site arguments, and by unifying constructor parameters with the fields they
 initialise. Without it every signature degrades to `Object` and nothing compiles.
+
+The type annotator also fixes the source language's arithmetic: integer `/` and `%`
+truncate for C and Java sources and floor for Python sources, and implicit int/double
+conversions become explicit casts, so every target computes the same numbers.
 
 Parsers: Python via `ast`, Java via `javalang`, C/C++ via a recursive-descent parser.
 C ↔ C++ also has a direct text rewriter, which round-trips those two exactly.
@@ -143,37 +149,39 @@ with nothing written by hand.
 
 ## Scoring models
 
-The two scores are predicted by models fitted on **measured migrations**, not on
-hand-written rules. `ml/build_dataset.py` runs a corpus of 40 stdin-driven programs
-through the engine to every other language and records what actually happened —
-**120 measured migrations across all 12 pairs** in `ml/migration_dataset.csv`.
+The scores are predicted by models fitted on **measured migrations**, not on
+hand-written rules. `ml/build_dataset.py` translates every program of `ml/corpus.py` and
+`ml/corpus_extra.json` into the other three languages, compiles and runs both sides on
+the programs' inputs, and records what actually happened — **297 measured translations
+of 46 tasks** in `ml/migration_dataset.csv` (refused translations are excluded).
 
 | Model | Predicts | Type |
 | --- | --- | --- |
-| `accuracy_model.pkl` | `behaviour_score` — % of inputs reproduced exactly | regressor |
-| `confidence_model.pkl` | `P(behaviour preserved)` | classifier |
-| `language_model.pkl` | source language, when the caller omits it | classifier |
+| `confidence_model.pkl` | `P(behaviour preserved)` | logistic regression on 4 features |
+| `accuracy_model.pkl` | `behaviour_score`, shown as predicted accuracy | 100 × the same probability |
+| `language_model.pkl` | source language, when the caller omits it | TF-IDF + logistic regression |
 
-Evaluated with grouped 5-fold CV — all rows for one program share a fold, so a model
-cannot score well by recognising a program it saw in another target language:
+`train_models.py` compares logistic regression, a random forest and a calibrated random
+forest on all 25 features and on a 4-feature subset with grouped 5-fold CV — all rows for
+one program share a fold — and deploys the lowest Brier score. Results are written to
+`ml/model_card.json`:
 
-| | model | baseline |
-| --- | --- | --- |
-| accuracy — MAE | **7.77** | 39.34 |
-| accuracy — R² | **0.772** | −0.013 |
-| confidence — accuracy | **0.958** | 0.733 |
-| confidence — ROC AUC | **0.936** | 0.500 |
+| grouped CV | deployed | compile status only | prior / mean |
+| --- | --- | --- | --- |
+| confidence — Brier score | **0.016** | 0.023 | 0.069 |
+| confidence — ROC AUC | **0.958** | 0.810 | n/a |
+| accuracy — MAE (points) | **3.88** | 4.61 | 13.78 |
 
 ```bash
 cd codeshift-backend
 set CODESHIFT_ENABLE_TEST_EXECUTION=1
-python -m cross_language_system.ml.build_dataset   # compiles and runs everything
+python -m cross_language_system.ml.build_dataset      # compiles and runs everything
 python -m cross_language_system.ml.train_models
+python -m cross_language_system.ml.language_detector  # grouped CV, then saves the model
 ```
 
-**Measured engine quality:** 93 of 120 migrations compile and 88 preserve behaviour.
-Compilation dominates the feature importances, because on this corpus almost everything
-that compiles is also correct.
+When test cases are supplied, the report shows the **measured** accuracy (share of passed
+test cases) instead of the predicted one, next to the model's confidence.
 
 ---
 
@@ -201,15 +209,16 @@ that compiles is also correct.
 ## Tests
 
 ```bash
-cd codeshift-backend  && pip install pytest && python -m pytest -q   # 142 tests
+cd codeshift-backend  && pip install pytest && python -m pytest -q   # 228 tests
 cd codeshift-frontend && npm run lint && npm run build
 ```
 
-Covers the version detector and every Python 2 → 3 rule, the AST validator, diff and
-change counting, the language registry, similarity scoring, all API routes including the
-payload limit, the test executor, the scoring models and their dataset, and conversion
-fidelity — parser coverage, type inference, generated-code content, and a compile check
-on all 12 pairs. Both suites run in CI on every push.
+Covers the version detectors and the gated upgrade rules of all four languages, the AST
+validator, diff and change counting, the language registry, similarity scoring, all API
+routes including the payload limit, the test executor, the scoring models, the language
+detector and their dataset, translation semantics (precedence, integer division, loops,
+formatted I/O, input, classes and structs, refusals) and a compile check on all 12
+pairs. Both suites run in CI on every push.
 
 ---
 
@@ -225,8 +234,9 @@ codeshift-backend/
     parsers/ generators/ validators/     one module per language
     ml/                       corpus, dataset builder, training, models
   version_upgrade_system/
+    core/                     gated rule engine, toolchain runner, comment/string masking
     languages/{python,java,c,cpp}/enterprise_engine/
-                              per-language transformer, validator, risk analyzer
+                              per-language rules and version detector
 
 codeshift-frontend/src/       pages, components, services, utils, styles
 ```
@@ -235,37 +245,36 @@ codeshift-frontend/src/       pages, components, services, utils, styles
 
 ## Known limitations
 
-Measured by probing 32 individual constructs across every direction, not estimated.
-Python → Java is the strongest path (13 of 18 constructs); C is the weakest target.
+Each program the engine cannot translate faithfully is **refused** with a reason
+(`Cannot translate this program faithfully: ...`) rather than translated approximately.
+The main gaps, from failures on programs that were never used during development:
 
-**Still missing**
+- **C as a target** has no growable list or string type: list growth, string building
+  and string methods from Python or Java, and C++ containers, `std::string`, classes and
+  `<iomanip>`, are refused.
+- **Refused C and C++ constructs:** `sizeof`, chained assignment, writes into `char`
+  arrays, function-like macros, stream manipulators such as `fixed`, increments inside
+  expressions and fall-through `switch` cases. Array members inside structs are not parsed.
+- **Refused Java and Python constructs:** lambdas, enums, labels, slicing and keyword
+  arguments.
+- **Unmapped library calls** (for example C++ `to_string` and `c_str`, Python
+  `round(x, n)` and character methods such as `ch.isupper()`) still produce code that does
+  not compile or fails at run time.
+- **Integer width:** Python's unbounded integers become 32-bit `int`; larger values
+  overflow silently.
+- Where a Python type cannot be inferred, Java falls back to `Object`; each such decision
+  is reported in the semantic findings.
+- Single-file programs that use standard input and output only: no multi-file projects,
+  concurrency or framework APIs.
 
-- **`enumerate`, `sorted`, string slicing, and dict iteration** (`for k, v in d.items()`)
-  are not lowered anywhere.
-- **Nested functions** are not hoisted, so they vanish in every target.
-- **C as a target** has no growable list, map or string type, so collections, f-strings
-  and `try/except` do not survive. C++ handles all three.
-- **C pointers, `malloc` and structs** do not reach Java or Python, and **C++ templates
-  and references** do not reach Java or C. These need real lowering, not a mapping.
-- Java's `?:` and `switch` reach Python but not the C family.
-
-**Handled by rewriting rather than mapping** — list comprehensions desugar into a loop
-plus appends, `a, b = input().split()` becomes N token reads, and Python default
-arguments become Java overloads, so each works in every target that supports the pieces.
-
-**Other caveats**
-
-- Where a Python type cannot be inferred, the target falls back to `Object` (Java), a
-  `template` parameter (C++) or `int` (C). Each such decision is reported in the
-  semantic findings.
-- The C/C++ parser covers the common procedural subset; macros, multiple inheritance
-  and operator overloading are not modelled.
+**Handled by lowering rather than mapping** — counting loops become `range` only when
+provably equivalent (otherwise a `while` loop), `switch` becomes an if/else chain,
+`printf`/`%`/f-string formatting goes through one format-string node, list
+comprehensions become loops with appends, tuple assignment goes through temporaries, and
+Python default arguments become Java overloads.
 
 ---
 
 ## License
 
 [MIT](LICENSE)
-- The 40-program corpus is arithmetic- and loop-heavy, so the 88/120 figure above is
-  more favourable than the construct probe. Both are real; the corpus measures a
-  narrower slice.

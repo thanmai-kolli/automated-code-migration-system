@@ -6,33 +6,44 @@ module builds a real IR so those directions generate meaningful code.
 
 It deliberately covers the common procedural subset — functions, structs and
 simple classes, declarations, control flow, calls and expressions — rather than
-the whole language.
+the whole language. Anything outside that subset raises UnsupportedConstruct:
+a construct that is skipped instead would vanish from the translation without
+a trace.
 """
 
 import re
 
+from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
+from cross_language_system.core.printf_format import tokens as format_tokens, value_count
+from cross_language_system.parsers import lowering
 
 
-TYPE_KEYWORDS = {
-    "void", "int", "long", "short", "char", "float", "double", "bool",
-    "unsigned", "signed", "string", "auto", "size_t", "const", "static",
-}
+QUALIFIERS = {"const", "static", "inline", "extern", "register", "volatile", "constexpr", "mutable"}
+
+PRIMITIVE_WORDS = {"void", "int", "long", "short", "char", "float", "double", "bool",
+                   "unsigned", "signed"}
+
+TYPE_KEYWORDS = PRIMITIVE_WORDS | QUALIFIERS | {"string", "auto", "size_t"}
 
 CONTROL_KEYWORDS = {
     "if", "else", "for", "while", "do", "return", "break", "continue",
     "switch", "case", "default", "struct", "class", "public", "private",
-    "protected", "new", "delete", "try", "catch", "throw",
+    "protected", "new", "delete", "try", "catch", "throw", "goto", "sizeof",
+    "template", "typename", "enum", "union", "operator", "friend", "virtual",
 }
 
 TOKEN_RE = re.compile(r"""
       (?P<comment>//[^\n]*|/\*.*?\*/)
-    | (?P<preproc>\#[^\n]*)
+    | (?P<preproc>\#[^\n]*(?:\\\n[^\n]*)*)
     | (?P<string>"(?:\\.|[^"\\])*")
     | (?P<char>'(?:\\.|[^'\\])')
-    | (?P<number>\d+\.\d+|\.\d+|\d+)
+    | (?P<number>0[xX][0-9a-fA-F]+[uUlL]*
+                |(?:\d+\.\d*|\.\d+)(?:[eE][+-]?\d+)?[fFlL]?
+                |\d+[eE][+-]?\d+[fFlL]?
+                |\d+[uUlL]*)
     | (?P<name>[A-Za-z_]\w*)
-    | (?P<op><<=|>>=|->|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\||\+=|-=|\*=|/=|%=|::)
+    | (?P<op><<=|>>=|->|\+\+|--|<<|>>|<=|>=|==|!=|&&|\|\||\+=|-=|\*=|/=|%=|&=|\|=|\^=|::)
     | (?P<punct>[{}()\[\];,.<>+\-*/%=!&|^~?:])
     | (?P<ws>\s+)
 """, re.VERBOSE | re.DOTALL)
@@ -41,11 +52,18 @@ TOKEN_RE = re.compile(r"""
 BINARY_PRECEDENCE = [
     (["||"], "Or"),
     (["&&"], "And"),
+    (["|"], None),
+    (["^"], None),
+    (["&"], None),
     (["==", "!="], None),
     (["<", ">", "<=", ">="], None),
+    (["<<", ">>"], None),
     (["+", "-"], None),
     (["*", "/", "%"], None),
 ]
+
+# A cout operand binds tighter than <<, so it is parsed from the additive level.
+ABOVE_SHIFT = 8
 
 COMPARISON_NAMES = {
     "==": "Eq", "!=": "NotEq", "<": "Lt", ">": "Gt", "<=": "LtE", ">=": "GtE",
@@ -56,28 +74,71 @@ ARITHMETIC_NAMES = {
     "&": "BitAnd", "|": "BitOr", "^": "BitXor", "<<": "LShift", ">>": "RShift",
 }
 
+COMPOUND_NAMES = {
+    "+=": "Add", "-=": "Sub", "*=": "Mult", "/=": "Div", "%=": "Mod",
+    "&=": "BitAnd", "|=": "BitOr", "^=": "BitXor", "<<=": "LShift", ">>=": "RShift",
+}
+
 TYPE_TO_IR = {
-    "int": "int", "long": "int", "short": "int", "size_t": "int",
-    "float": "double", "double": "double",
+    "int": "int", "short": "int", "size_t": "long", "unsigned": "int", "signed": "int",
+    "long": "long", "long long": "long", "long int": "long", "long long int": "long",
+    "short int": "int", "unsigned int": "int", "signed int": "int",
+    "unsigned long": "long", "unsigned long long": "long", "unsigned short": "int",
+    "float": "double", "double": "double", "long double": "double",
+    "char": "char", "signed char": "char", "unsigned char": "char",
     "bool": "boolean",
     "char*": "String", "string": "String", "std::string": "String",
     "void": "void",
 }
 
+CASTS = {"int": "int", "long": "long", "short": "int", "char": "char",
+         "float": "float", "double": "float", "boolean": "bool", "String": "str"}
+
+SCANF_TYPES = {"d": "int", "i": "int", "u": "int", "f": "double", "e": "double",
+               "g": "double", "s": "token", "c": "char"}
+
+STREAM_MANIPULATORS = {"fixed", "setprecision", "setw", "scientific", "boolalpha", "left",
+                       "right", "setfill", "showpoint", "hex", "dec", "oct", "noboolalpha"}
+
+SCALARS = {"int", "long", "double", "char", "boolean", "String"}
+
+# <limits.h> / <climits> constants, as plain values.
+LIMITS = {"INT_MAX": 2**31 - 1, "INT_MIN": -2**31, "LLONG_MAX": 2**63 - 1,
+          "LLONG_MIN": -2**63, "LONG_MAX": 2**31 - 1, "LONG_MIN": -2**31}
+
+
+class _Step:
+    """x++ / ++x / x-- / --x, held apart until it is known to stand alone.
+
+    As a statement (or a for-loop update) it is just x += 1. Inside a larger
+    expression its side effect would need statement hoisting, so any _Step
+    that survives parsing is refused.
+    """
+
+    def __init__(self, target, operator):
+        self.target = target
+        self.operator = operator
+
 
 def tokenize(code):
 
     tokens = []
+    macros = {}
     position = 0
 
     while position < len(code):
         match = TOKEN_RE.match(code, position)
         if not match:
-            position += 1
-            continue
+            raise UnsupportedConstruct(f"unexpected character {code[position]!r}")
         position = match.end()
         kind = match.lastgroup
-        if kind in ("ws", "comment", "preproc"):
+        if kind == "preproc":
+            _define(match.group(), macros)
+            continue
+        if kind in ("ws", "comment"):
+            continue
+        if kind == "name" and match.group() in macros:
+            tokens.extend(macros[match.group()])
             continue
         tokens.append((kind, match.group()))
 
@@ -85,11 +146,33 @@ def tokenize(code):
     return tokens
 
 
+def _define(line, macros):
+    """#define NAME value becomes a token substitution; anything fancier is refused."""
+
+    match = re.match(r"#\s*define\s+([A-Za-z_]\w*)(\(?)(.*)", line.replace("\\\n", " "))
+    if not match:
+        return
+    name, function_like, body = match.groups()
+    if function_like:
+        raise UnsupportedConstruct(f"function-like macro {name}()")
+    body_tokens = [t for t in tokenize(body.strip())[:-1]]
+    if len(body_tokens) > 1:
+        # Keep the macro's grouping wherever it is used.
+        body_tokens = [("punct", "(")] + body_tokens + [("punct", ")")]
+    macros[name] = body_tokens
+
+
 class CLikeParser:
 
     def __init__(self):
         self.tokens = []
         self.index = 0
+        self.records = set()
+        self._temp_index = 0
+        # Declared variable types (function-scoped is enough for the checks
+        # below) and the char arrays that hold C strings.
+        self.var_types = {}
+        self.c_strings = set()
 
     # ------------------------------------------------------------
     # TOKEN HELPERS
@@ -108,7 +191,7 @@ class CLikeParser:
         return token
 
     def accept(self, text):
-        if self.value() == text:
+        if self.value() == text and self.peek()[0] != "string":
             self.index += 1
             return True
         return False
@@ -119,6 +202,10 @@ class CLikeParser:
 
     def at_end(self):
         return self.peek()[0] == "eof"
+
+    def _skip_namespace(self):
+        while self.value() == "std" and self.value(1) == "::":
+            self.index += 2
 
     # ------------------------------------------------------------
     # ENTRY POINT
@@ -136,33 +223,51 @@ class CLikeParser:
             if self.accept(";"):
                 continue
 
-            if self.value() in ("using", "namespace", "typedef"):
+            if self.value() in ("using", "namespace"):
                 self._skip_to_semicolon()
                 continue
 
-            if self.value() in ("struct", "class"):
-                parsed = self._parse_record()
-                if parsed:
-                    body.append(parsed)
+            if self.value() == "typedef":
+                record = self._parse_typedef()
+                if record is not None:
+                    body.append(record)
                 continue
+
+            if self.value() in ("struct", "class") and self.value(2) in ("{", ":"):
+                body.append(self._parse_record())
+                continue
+
+            if self.value() in ("template", "enum", "union"):
+                raise UnsupportedConstruct(f"{self.value()} declarations")
 
             declaration = self._parse_top_level_declaration()
             if isinstance(declaration, list):
                 body.extend(declaration)
             elif declaration is not None:
                 body.append(declaration)
-            elif not self.at_end():
-                self.index += 1
 
-        return Program(body)
+        program = Program(body)
+        self._refuse_leftover_steps(program)
+        return program
+
+    def _refuse_leftover_steps(self, program):
+        stack = [program]
+        while stack:
+            node = stack.pop()
+            if isinstance(node, _Step):
+                raise UnsupportedConstruct("++ or -- inside a larger expression")
+            if isinstance(node, list):
+                stack.extend(node)
+            elif hasattr(node, "__dict__"):
+                stack.extend(v for v in vars(node).values() if isinstance(v, list) or hasattr(v, "__dict__"))
 
     def _skip_to_semicolon(self):
         depth = 0
         while not self.at_end():
             token = self.value()
-            if token in "{([":
+            if token in ("{", "(", "["):
                 depth += 1
-            elif token in "})]":
+            elif token in ("}", ")", "]"):
                 depth -= 1
             self.index += 1
             if token == ";" and depth <= 0:
@@ -174,31 +279,56 @@ class CLikeParser:
 
     def _looks_like_type(self, offset=0):
         kind, text = self.peek(offset)
+        if kind != "name":
+            return False
         if text in TYPE_KEYWORDS:
+            return True
+        if text == "struct":
+            return self.peek(offset + 1)[0] == "name"
+        if text == "std" and self.value(offset + 1) == "::":
+            return self.value(offset + 2) in ("string", "vector", "set", "map")
+        if text in self.records and self.peek(offset + 1)[0] == "name":
             return True
         # A user type is an identifier followed by another identifier or a star.
         return (
-            kind == "name"
-            and text not in CONTROL_KEYWORDS
-            and (self.peek(offset + 1)[0] == "name" or self.value(offset + 1) in ("*", "<"))
+            text not in CONTROL_KEYWORDS
+            and (self.peek(offset + 1)[0] == "name" or self.value(offset + 1) == "<")
         )
 
     def _parse_type(self):
 
-        parts = []
-
-        while self.value() in ("const", "static", "unsigned", "signed"):
+        constant = False
+        while self.value() in QUALIFIERS:
+            constant = constant or self.value() == "const"
             self.index += 1
+
+        if self.accept("struct"):
+            pass
 
         if self.peek()[0] != "name":
             return None
 
-        parts.append(self.next()[1])
+        self._skip_namespace()
 
-        while self.accept("::"):
-            parts.append(self.next()[1])
+        # unsigned long long int, long double, ...
+        if self.value() in PRIMITIVE_WORDS:
+            words = []
+            while self.value() in PRIMITIVE_WORDS:
+                words.append(self.next()[1])
+            if words in (["unsigned"], ["signed"]):
+                words.append("int")
+            name = " ".join(words)
+            if name not in TYPE_TO_IR:
+                raise UnsupportedConstruct(f"the type '{name}'")
+        else:
+            parts = [self.next()[1]]
+            while self.accept("::"):
+                parts.append(self.next()[1])
+            name = "::".join(parts)
 
-        name = "::".join(parts)
+        while self.value() in QUALIFIERS:
+            constant = constant or self.value() == "const"
+            self.index += 1
 
         # Template arguments: vector<int>
         if self.value() == "<":
@@ -215,24 +345,44 @@ class CLikeParser:
                         break
                     inner.append(token)
                     continue
+                elif token == ">>":
+                    raise UnsupportedConstruct("nested template types")
                 elif depth:
                     inner.append(token)
                 self.index += 1
-            element = self._to_ir_type("".join(inner) or "int")
-            container = "Set" if name.endswith("set") else "List"
-            return f"{container}<{self._box(element)}>"
+            base = name.split("::")[-1]
+            if base not in ("vector", "set", "list"):
+                raise UnsupportedConstruct(f"the template type {base}<...>")
+            element = self._to_ir_type(" ".join(inner) or "int")
+            container = "Set" if base == "set" else "List"
+            name = f"{container}<{self._box(element)}>"
+            return self._decorators(name, constant)
+
+        return self._decorators(self._to_ir_type(name), constant)
+
+    def _decorators(self, name, constant):
+        """Pointer and reference markers after a type."""
 
         pointer = False
-        while self.value() in ("*", "&"):
-            pointer = pointer or self.value() == "*"
-            self.index += 1
+        while self.value() in ("*", "&", "const"):
+            token = self.next()[1]
+            if token == "*":
+                pointer = True
+            elif token == "&" and not constant and name in SCALARS:
+                # Writing through a reference changes the caller's variable,
+                # which Python and Java cannot do for a value type. Containers
+                # and objects are references there already.
+                raise UnsupportedConstruct("non-const references to a scalar")
 
         if pointer and name == "char":
             return "String"
+        if pointer and name in self.records:
+            # Every Python or Java object is already a reference, so a pointer
+            # to a struct means the same thing as the struct itself there.
+            return name
         if pointer:
-            return f"List<{self._box(self._to_ir_type(name))}>"
-
-        return self._to_ir_type(name)
+            return f"List<{self._box(name)}>"
+        return name
 
     @staticmethod
     def _to_ir_type(name):
@@ -240,7 +390,8 @@ class CLikeParser:
 
     @staticmethod
     def _box(name):
-        return {"int": "Integer", "double": "Double", "boolean": "Boolean"}.get(name, name)
+        return {"int": "Integer", "long": "Long", "double": "Double", "boolean": "Boolean",
+                "char": "Character"}.get(name, name)
 
     # ------------------------------------------------------------
     # DECLARATIONS
@@ -248,49 +399,69 @@ class CLikeParser:
 
     def _parse_top_level_declaration(self):
 
-        start = self.index
+        if not self._looks_like_type():
+            raise UnsupportedConstruct(f"unexpected '{self.value()}' at the top level")
+
         declared = self._parse_type()
 
         if declared is None or self.peek()[0] != "name":
-            self.index = start
-            return None
+            raise UnsupportedConstruct(f"unexpected '{self.value()}' after a type")
 
         name = self.next()[1]
+
+        if self.value() == "::":
+            raise UnsupportedConstruct("member functions defined outside their class")
 
         if self.value() == "(":
             return self._parse_function(declared, name)
 
-        # Global variable
-        if self.value() == "=":
-            self.index += 1
-            value = self._parse_expression()
-            self.accept(";")
-            return Variable(name, declared, value)
-
-        self._skip_to_semicolon()
-        return Variable(name, declared, None)
+        # Global variable(s): rewind onto the name and reuse the local path.
+        self.index -= 1
+        return self._parse_declarators(declared)
 
     def _parse_function(self, return_type, name, owner=None):
 
         params, param_types = self._parse_parameters()
 
-        # Array parameters carry a companion length in C; drop it on the way in.
-        if self.value() == ";":
+        while self.value() in ("const", "override", "noexcept", "final"):
             self.index += 1
+
+        # A prototype declares nothing the IR needs.
+        if self.accept(";"):
             return None
+
+        prelude = []
+        if self.accept(":"):
+            if owner is None or name != owner:
+                raise SyntaxError("only a constructor may have an initializer list")
+            prelude = self._parse_member_initializers()
 
         body = self._parse_block()
 
         return Function(
             name,
             params,
-            body,
+            prelude + body,
             return_type,
             is_constructor=(owner is not None and name == owner),
             is_static=owner is None,
             param_types=param_types,
             owner=owner,
         )
+
+    def _parse_member_initializers(self):
+        """balance(b), owner(o)  ->  this->balance = b; this->owner = o;"""
+
+        assignments = []
+        while self.peek()[0] == "name":
+            member = self.next()[1]
+            self.expect("(")
+            value = self._parse_value()
+            self.expect(")")
+            assignments.append(Assignment(AttributeAccess(SelfRef(), member), value))
+            if not self.accept(","):
+                break
+        return assignments
 
     def _parse_parameters(self):
 
@@ -309,37 +480,64 @@ class CLikeParser:
 
             declared = self._parse_type()
 
-            if self.peek()[0] == "name":
-                name = self.next()[1]
-                while self.accept("["):
-                    self.accept("]")
-                    declared = f"List<{self._box(declared)}>"
-                params.append(name)
-                param_types[name] = declared
-            else:
-                self.index += 1
+            if declared is None or self.peek()[0] != "name":
+                raise UnsupportedConstruct("unnamed or unusual function parameters")
 
-        self.accept(")")
+            name = self.next()[1]
+            while self.accept("["):
+                while not self.at_end() and self.value() != "]":
+                    self.index += 1
+                self.expect("]")
+                declared = f"List<{self._box(declared)}>"
+            if self.value() == "=":
+                raise UnsupportedConstruct("default parameter values")
+            params.append(name)
+            param_types[name] = declared
+            self.var_types[name] = declared
+
+        self.expect(")")
         return params, param_types
+
+    def _parse_typedef(self):
+        """typedef struct { ... } Name;  is a record; other typedefs are refused."""
+
+        self.index += 1  # typedef
+        if self.value() != "struct":
+            raise UnsupportedConstruct("typedef of a non-struct type")
+        self.index += 1
+        if self.peek()[0] == "name" and self.value(1) == "{":
+            self.index += 1
+        if self.value() != "{":
+            raise UnsupportedConstruct("typedef of a struct declared elsewhere")
+        record = self._parse_record_body("_anonymous")
+        alias = self.next()[1]
+        self.expect(";")
+        record.name = alias
+        for method in record.methods:
+            method.owner = alias
+        self.records.add(alias)
+        return record
 
     def _parse_record(self):
         """struct / class declaration."""
 
         self.index += 1  # struct | class
-
-        name = self.next()[1] if self.peek()[0] == "name" else "Anonymous"
+        name = self.next()[1]
 
         base = None
         if self.accept(":"):
-            while self.value() in ("public", "private", "protected"):
+            while self.value() in ("public", "private", "protected", "virtual"):
                 self.index += 1
-            if self.peek()[0] == "name":
-                base = self.next()[1]
+            base = self.next()[1]
 
-        if not self.accept("{"):
-            self._skip_to_semicolon()
-            return None
+        self.records.add(name)
+        record = self._parse_record_body(name, base)
+        self.expect(";")
+        return record
 
+    def _parse_record_body(self, name, base=None):
+
+        self.expect("{")
         fields = []
         methods = []
 
@@ -347,13 +545,17 @@ class CLikeParser:
 
             if self.value() in ("public", "private", "protected"):
                 self.index += 1
-                self.accept(":")
+                self.expect(":")
                 continue
 
             if self.accept(";"):
                 continue
 
-            start = self.index
+            if self.value() in ("friend", "virtual", "operator", "template") or self.value() == "~":
+                raise UnsupportedConstruct(f"'{self.value()}' members in a class")
+
+            if self.value() == "static":
+                raise UnsupportedConstruct("static class members")
 
             # Constructor: Name(
             if self.value() == name and self.value(1) == "(":
@@ -366,8 +568,7 @@ class CLikeParser:
             declared = self._parse_type()
 
             if declared is None or self.peek()[0] != "name":
-                self.index = start + 1
-                continue
+                raise UnsupportedConstruct(f"unexpected '{self.value()}' in a class body")
 
             member = self.next()[1]
 
@@ -378,17 +579,21 @@ class CLikeParser:
                     methods.append(method)
                 continue
 
-            value = None
-            if self.accept("="):
-                value = self._parse_expression()
+            while True:
+                value = None
+                if self.accept("="):
+                    value = self._parse_value()
+                fields.append(Field(member, declared, value))
+                if not self.accept(","):
+                    break
+                member = self.next()[1]
+            self.expect(";")
 
-            fields.append(Field(member, declared, value))
-            self._skip_to_semicolon()
+        self.expect("}")
 
-        self.accept("}")
-        self.accept(";")
-
-        return Class(name, methods, fields, base)
+        record = Class(name, methods, fields, base)
+        lowering.bind_members(record)
+        return record
 
     # ------------------------------------------------------------
     # STATEMENTS
@@ -400,7 +605,9 @@ class CLikeParser:
 
         if not self.accept("{"):
             statement = self._parse_statement()
-            return [statement] if statement else []
+            if isinstance(statement, list):
+                return [s for s in statement if s is not None]
+            return [statement] if statement is not None else []
 
         while not self.at_end() and self.value() != "}":
             statement = self._parse_statement()
@@ -410,36 +617,39 @@ class CLikeParser:
             elif statement is not None:
                 body.append(statement)
 
-        self.accept("}")
+        self.expect("}")
         return body
 
     def _parse_statement(self):
 
         token = self.value()
 
+        if self.peek()[0] in ("string", "number", "char"):
+            token = None
+
         if token == ";":
             self.index += 1
             return None
 
         if token == "{":
-            return IfStatement(Constant(True), self._parse_block())
+            return Block(self._parse_block())
 
         if token == "return":
             self.index += 1
             if self.accept(";"):
                 return Return(None)
-            value = self._parse_expression()
-            self.accept(";")
+            value = self._parse_value()
+            self.expect(";")
             return Return(value)
 
         if token == "break":
             self.index += 1
-            self.accept(";")
+            self.expect(";")
             return Break()
 
         if token == "continue":
             self.index += 1
-            self.accept(";")
+            self.expect(";")
             return Continue()
 
         if token == "if":
@@ -448,12 +658,33 @@ class CLikeParser:
         if token == "while":
             self.index += 1
             self.expect("(")
-            condition = self._parse_expression()
+            condition = self._parse_value()
             self.expect(")")
             return WhileLoop(condition, self._parse_block())
 
+        if token == "do":
+            self.index += 1
+            body = self._parse_block()
+            self.expect("while")
+            self.expect("(")
+            condition = self._parse_value()
+            self.expect(")")
+            self.expect(";")
+            return lowering.do_while(body, condition)
+
         if token == "for":
             return self._parse_for()
+
+        if token == "switch":
+            return self._parse_switch()
+
+        if token in ("delete",):
+            # Freeing memory has no counterpart in a garbage-collected target.
+            self._skip_to_semicolon()
+            return None
+
+        if token in ("goto", "throw", "try", "case", "default"):
+            raise UnsupportedConstruct(f"'{token}' statements")
 
         if token in ("cout", "std") and "cout" in (self.value(), self.value(2)):
             return self._parse_cout()
@@ -461,61 +692,150 @@ class CLikeParser:
         if token in ("cin", "std") and "cin" in (self.value(), self.value(2)):
             return self._parse_cin()
 
+        if token == "getline" or (token == "std" and self.value(2) == "getline"):
+            return self._parse_getline()
+
         if token == "printf":
             return self._parse_printf()
+
+        if token == "puts":
+            self.index += 1
+            self.expect("(")
+            value = self._parse_value()
+            self.expect(")")
+            self.expect(";")
+            return PrintStatement([value], end="\n")
+
+        if token == "putchar":
+            self.index += 1
+            self.expect("(")
+            value = self._parse_value()
+            self.expect(")")
+            self.expect(";")
+            if not (isinstance(value, Constant) and isinstance(value.value, str)):
+                value = FormatString("%c", [value])
+            return PrintStatement([value], end="")
 
         if token == "scanf":
             return self._parse_scanf()
 
+        if token == "struct" and self.peek(1)[0] == "name" and self.peek(2)[0] == "name":
+            self.index += 1
+
         # Declaration?
         if self._looks_like_type():
-            start = self.index
-            declaration = self._parse_declaration()
-            if declaration is not None:
-                return declaration
-            self.index = start
+            return self._parse_declarators(self._parse_type())
 
         expression = self._parse_expression()
-        self.accept(";")
+        self.expect(";")
+        return self._as_statement(expression)
 
-        if isinstance(expression, tuple):
-            return expression[0]
+    def _as_statement(self, expression):
+
+        if isinstance(expression, _Step):
+            return AugAssign(expression.target, expression.operator, Constant(1))
+
+        if isinstance(expression, MethodCall) and expression.method == "push_back" \
+                and len(expression.args) == 1:
+            return ListAppend(expression.obj, expression.args[0])
+
+        # std::swap(a, b) exchanges two variables or elements.
+        if isinstance(expression, FunctionCall) and expression.name == "swap" and len(expression.args) == 2:
+            first, second = expression.args
+            self._temp_index += 1
+            temp = f"_swap{self._temp_index}"
+            return [Variable(temp, "auto", first), self._assign(first, second),
+                    self._assign(second, Identifier(temp))]
+
+        # sort(v.begin(), v.end()) sorts the whole container.
+        if isinstance(expression, FunctionCall) and expression.name == "sort" and len(expression.args) == 2:
+            begin, end = expression.args
+            if (isinstance(begin, MethodCall) and begin.method == "begin"
+                    and isinstance(end, MethodCall) and end.method == "end"
+                    and isinstance(begin.obj, Identifier) and isinstance(end.obj, Identifier)
+                    and begin.obj.name == end.obj.name):
+                return MethodCall(begin.obj, "sort", [])
+
+        if isinstance(expression, (Identifier, Constant, BinaryOp, BooleanOp)):
+            raise UnsupportedConstruct("an expression statement with no effect")
 
         return expression
 
-    def _parse_declaration(self):
+    @staticmethod
+    def _assign(target, value):
+        if isinstance(target, Identifier):
+            return Variable(target.name, "auto", value)
+        return Assignment(target, value)
 
-        declared = self._parse_type()
+    def _parse_declarators(self, declared):
+        """int n, i = 0, xs[10];  ->  one Variable per name."""
 
         if declared is None or self.peek()[0] != "name":
-            return None
+            raise UnsupportedConstruct(f"unexpected '{self.value()}' in a declaration")
 
         declarations = []
 
-        # int n, i, total;  -> one Variable per name
         while True:
 
             name = self.next()[1]
             element_type = declared
+            dimensions = []
 
-            if self.accept("["):
-                while not self.at_end() and self.value() != "]":
-                    self.index += 1
-                self.accept("]")
-                element_type = f"List<{self._box(declared)}>"
+            while self.accept("["):
+                dimensions.append(None if self.value() == "]" else self._parse_value())
+                self.expect("]")
+                element_type = f"List<{self._box(element_type)}>"
 
             value = None
             if self.accept("="):
                 value = self._parse_initializer()
+            elif self.value() == "(":
+                value = self._constructor_arguments(declared)
+            elif dimensions and all(d is not None for d in dimensions):
+                value = FunctionCall("range_array", dimensions)
+                value.element_type = declared
+            elif declared in self.records:
+                # A struct variable is a value that already exists in C.
+                value = ObjectCreation(declared, [])
 
+            if dimensions and None in dimensions and not isinstance(value, ArrayLiteral):
+                if not (declared == "char" and isinstance(value, Constant)):
+                    raise UnsupportedConstruct("an array of unspecified size")
+
+            if declared == "char" and len(dimensions) == 1 and not isinstance(value, ArrayLiteral):
+                # A char buffer holds a C string: char word[100]; scanf("%s", word);
+                element_type = "String"
+                if isinstance(value, FunctionCall) and value.name == "range_array":
+                    value = None
+                self.c_strings.add(name)
+
+            if declared in self.records and isinstance(value, Identifier):
+                # C copies the struct; a Python or Java assignment would alias it.
+                raise UnsupportedConstruct("copying a struct by assignment")
+
+            self.var_types[name] = element_type
             declarations.append(Variable(name, element_type, value))
 
-            if not self.accept(",") or self.peek()[0] != "name":
+            if not self.accept(","):
                 break
 
-        self._skip_to_semicolon()
-
+        self.expect(";")
         return declarations[0] if len(declarations) == 1 else declarations
+
+    def _constructor_arguments(self, declared):
+        """vector<int> v(n);  Account a(100);"""
+
+        self.expect("(")
+        args = self._call_arguments()
+        self.expect(")")
+        if declared.startswith("List<"):
+            if len(args) != 1:
+                raise UnsupportedConstruct("vector constructors other than vector<T>(n)")
+            value = FunctionCall("range_array", args)
+            value.element_type = {"Integer": "int", "Long": "long", "Double": "double",
+                                  "Boolean": "boolean"}.get(declared[5:-1], "Object")
+            return value
+        return ObjectCreation(declared, args)
 
     def _parse_initializer(self):
 
@@ -524,17 +844,17 @@ class CLikeParser:
             while not self.at_end() and self.value() != "}":
                 if self.accept(","):
                     continue
-                elements.append(self._parse_expression())
-            self.accept("}")
+                elements.append(self._parse_initializer())
+            self.expect("}")
             return ArrayLiteral(elements)
 
-        return self._parse_expression()
+        return self._parse_value()
 
     def _parse_if(self):
 
         self.index += 1
         self.expect("(")
-        condition = self._parse_expression()
+        condition = self._parse_value()
         self.expect(")")
 
         body = self._parse_block()
@@ -560,59 +880,96 @@ class CLikeParser:
             if self.peek()[0] == "name" and self.value(1) == ":":
                 iterator = self.next()[1]
                 self.index += 1
-                iterable = self._parse_expression()
+                iterable = self._parse_value()
                 self.expect(")")
                 return ForLoop(iterator, iterable, self._parse_block())
         self.index = start
 
-        init = self._parse_statement()
-        condition = None if self.value() == ";" else self._parse_expression()
-        self.accept(";")
-        step = None if self.value() == ")" else self._parse_expression()
+        init = []
+        declared = False
+        if not self.accept(";"):
+            if self._looks_like_type():
+                declared = True
+                parsed = self._parse_declarators(self._parse_type())
+                init = parsed if isinstance(parsed, list) else [parsed]
+            else:
+                init = self._comma_statements()
+                self.expect(";")
+
+        condition = None if self.value() == ";" else self._parse_value()
+        self.expect(";")
+        update = [] if self.value() == ")" else self._comma_statements()
         self.expect(")")
         body = self._parse_block()
 
-        # for (int i = start; i < end; i++)  ->  a range loop
-        if (
-            isinstance(init, Variable)
-            and isinstance(condition, BooleanOp)
-            and condition.operator in ("Lt", "LtE")
-        ):
-            end = condition.right
-            if condition.operator == "LtE":
-                end = BinaryOp(end, "Add", Constant(1))
-            return ForLoop(init.name, RangeCall([init.value or Constant(0), end]), body)
+        return lowering.counting_loop(init, condition, update, body, declared)
 
-        if init is not None:
-            body = body + [step] if step is not None else body
-            return IfStatement(Constant(True), [init, WhileLoop(condition or Constant(True), body)])
+    def _comma_statements(self):
+        """i = 0, j = n  or  i++, j--  in a for header."""
 
-        return WhileLoop(condition or Constant(True), body)
+        statements = [self._as_statement(self._parse_expression())]
+        while self.accept(","):
+            statements.append(self._as_statement(self._parse_expression()))
+        return statements
+
+    def _parse_switch(self):
+
+        self.index += 1
+        self.expect("(")
+        subject = self._parse_value()
+        self.expect(")")
+        self.expect("{")
+
+        cases = []
+        while not self.at_end() and self.value() != "}":
+            if self.accept("case"):
+                label = self._parse_value()
+                self.expect(":")
+            elif self.accept("default"):
+                label = None
+                self.expect(":")
+            else:
+                raise SyntaxError(f"expected case or default, found {self.value()!r}")
+
+            statements = []
+            while not self.at_end() and self.value() not in ("case", "default", "}"):
+                statement = self._parse_statement()
+                if isinstance(statement, list):
+                    statements.extend(s for s in statement if s is not None)
+                elif statement is not None:
+                    statements.append(statement)
+            cases.append((label, statements))
+
+        self.expect("}")
+        self._temp_index += 1
+        return lowering.switch(subject, cases, f"_switch{self._temp_index}")
 
     def _parse_cout(self):
 
-        while self.value() in ("std", "::"):
-            self.index += 1
+        self._skip_namespace()
         self.index += 1  # cout
 
-        args = []
+        parts = []
         while self.accept("<<"):
-            if self.value() in ("endl", "std"):
-                while self.value() in ("std", "::"):
-                    self.index += 1
-                if self.value() == "endl":
-                    self.index += 1
+            self._skip_namespace()
+            if self.value() == "endl":
+                self.index += 1
+                parts.append(Constant("\n"))
                 continue
-            args.append(self._parse_expression())
+            if self.value() == "flush":
+                self.index += 1
+                continue
+            if self.value() in STREAM_MANIPULATORS:
+                raise UnsupportedConstruct(f"the stream manipulator {self.value()}")
+            parts.append(self._parse_binary(ABOVE_SHIFT))
 
-        self.accept(";")
-        return PrintStatement(args)
+        self.expect(";")
+        return PrintStatement(parts, end="", sep="")
 
     def _parse_cin(self):
         """cin >> a >> b  ->  one read per target."""
 
-        while self.value() in ("std", "::"):
-            self.index += 1
+        self._skip_namespace()
         self.index += 1  # cin
 
         reads = []
@@ -621,12 +978,24 @@ class CLikeParser:
             # The type comes from the variable's declaration; the annotator fills it.
             reads.append(Assignment(target, Input(None, None)))
 
-        self.accept(";")
+        self.expect(";")
 
         return reads or None
 
-    SCANF_TYPES = {"d": "int", "i": "int", "u": "int", "ld": "int",
-                   "f": "double", "lf": "double", "g": "double", "s": "String"}
+    def _parse_getline(self):
+        """getline(cin, line)  ->  a whole-line read."""
+
+        self._skip_namespace()
+        self.index += 1
+        self.expect("(")
+        self._skip_namespace()
+        if not self.accept("cin"):
+            raise UnsupportedConstruct("getline from anything but cin")
+        self.expect(",")
+        target = self._parse_postfix()
+        self.expect(")")
+        self.expect(";")
+        return Assignment(target, Input(None, "String"))
 
     def _parse_scanf(self):
         """scanf("%d %d", &a, &b)  ->  one typed read per target."""
@@ -638,78 +1007,88 @@ class CLikeParser:
         while not self.at_end() and self.value() != ")":
             if self.accept(","):
                 continue
-            if self.accept("&"):
-                continue
-            arguments.append(self._parse_expression())
+            self.accept("&")
+            arguments.append(self._parse_value())
 
-        self.accept(")")
-        self.accept(";")
+        self.expect(")")
+        self.expect(";")
 
-        if not arguments:
-            return None
+        if not arguments or not isinstance(arguments[0], Constant) or not isinstance(arguments[0].value, str):
+            raise UnsupportedConstruct("scanf with a computed format string")
 
-        specifiers = []
-        if isinstance(arguments[0], Constant) and isinstance(arguments[0].value, str):
-            specifiers = re.findall(r"%\w*([a-zA-Z])", arguments[0].value)
-            targets = arguments[1:]
-        else:
-            targets = arguments
+        specs = [t for t in format_tokens(arguments[0].value) if isinstance(t, dict) and t["conv"] != "%"]
+        targets = arguments[1:]
+        if len(specs) != len(targets):
+            raise UnsupportedConstruct("scanf whose format does not match its arguments")
 
         reads = []
-        for index, target in enumerate(targets):
-            letter = specifiers[index] if index < len(specifiers) else "d"
-            reads.append(Assignment(target, Input(None, self.SCANF_TYPES.get(letter, "int"))))
+        for spec, target in zip(specs, targets):
+            # %99s only bounds the buffer; the word read is the same.
+            if (spec["width"] and spec["conv"] != "s") or spec["conv"] not in SCANF_TYPES:
+                raise UnsupportedConstruct(f"scanf conversion {spec['raw']}")
+            kind = SCANF_TYPES[spec["conv"]]
+            if kind == "int" and spec["length"] in ("l", "ll"):
+                kind = "long"
+            reads.append(Assignment(target, Input(None, kind)))
 
-        return reads or None
+        return reads
 
     def _parse_printf(self):
 
         self.index += 1
         self.expect("(")
+        args = self._call_arguments()
+        self.expect(")")
+        self.expect(";")
 
-        args = []
-        while not self.at_end() and self.value() != ")":
-            if self.accept(","):
-                continue
-            args.append(self._parse_expression())
+        if not args or not isinstance(args[0], Constant) or not isinstance(args[0].value, str):
+            raise UnsupportedConstruct("printf with a computed format string")
+        if value_count(args[0].value) != len(args) - 1:
+            raise UnsupportedConstruct("printf whose format does not match its arguments")
 
-        self.accept(")")
-        self.accept(";")
-
-        # Drop the format string; keep the values being printed.
-        if args and isinstance(args[0], Constant) and isinstance(args[0].value, str):
-            literal = re.sub(r"%[-0-9.]*[a-zA-Z]", "", args[0].value).replace("\\n", "").strip()
-            remaining = args[1:]
-            if literal:
-                remaining = [Constant(literal)] + remaining
-            args = remaining
-
-        return PrintStatement(args)
+        return PrintStatement([FormatString(args[0].value, args[1:])], end="")
 
     # ------------------------------------------------------------
     # EXPRESSIONS
     # ------------------------------------------------------------
 
     def _parse_expression(self):
-        return self._parse_assignment()
+        """An expression that may assign (statement level only)."""
 
-    def _parse_assignment(self):
+        left = self._parse_value()
 
-        left = self._parse_binary(0)
+        if (self.value() == "=" or self.value() in COMPOUND_NAMES) and getattr(left, "c_string", False):
+            # Python and Java strings cannot be changed in place.
+            raise UnsupportedConstruct("writing into a C string")
 
         if self.value() == "=":
             self.index += 1
-            right = self._parse_assignment()
+            right = self._parse_value()
+            if self.value() in ("=",) or self.value() in COMPOUND_NAMES:
+                raise UnsupportedConstruct("chained assignment")
             if isinstance(left, Identifier):
                 return Variable(left.name, "auto", right)
             return Assignment(left, right)
 
-        compound = {"+=": "Add", "-=": "Sub", "*=": "Mult", "/=": "Div", "%=": "Mod"}
-        if self.value() in compound:
-            operator = compound[self.next()[1]]
-            return AugAssign(left, operator, self._parse_assignment())
+        if self.value() in COMPOUND_NAMES:
+            operator = COMPOUND_NAMES[self.next()[1]]
+            right = self._parse_value()
+            return AugAssign(left, operator, right)
 
         return left
+
+    def _parse_value(self):
+        """An expression that only produces a value: ternaries and below."""
+
+        condition = self._parse_binary(0)
+
+        if self.accept("?"):
+            if_true = self._parse_value()
+            self.expect(":")
+            if_false = self._parse_value()
+            return TernaryOp(condition, if_true, if_false)
+
+        return condition
 
     def _parse_binary(self, level):
 
@@ -719,7 +1098,7 @@ class CLikeParser:
         left = self._parse_binary(level + 1)
         operators, logical = BINARY_PRECEDENCE[level]
 
-        while self.value() in operators:
+        while self.value() in operators and self.peek()[0] in ("op", "punct"):
             symbol = self.next()[1]
             right = self._parse_binary(level + 1)
 
@@ -728,31 +1107,76 @@ class CLikeParser:
             elif symbol in COMPARISON_NAMES:
                 left = BooleanOp(left, COMPARISON_NAMES[symbol], right)
             else:
-                left = BinaryOp(left, ARITHMETIC_NAMES.get(symbol, "Add"), right)
+                left = BinaryOp(left, ARITHMETIC_NAMES[symbol], right)
 
         return left
 
     def _parse_unary(self):
 
-        if self.value() in ("-", "!", "~", "+"):
+        if self.value() in ("-", "!", "~", "+") and self.peek()[0] == "punct":
             operator = {"-": "USub", "+": "UAdd", "!": "Not", "~": "Invert"}[self.next()[1]]
             return UnaryOp(operator, self._parse_unary())
 
         if self.value() in ("++", "--"):
-            self.index += 1
-            return self._parse_unary()
+            operator = "Add" if self.next()[1] == "++" else "Sub"
+            return _Step(self._parse_unary(), operator)
 
-        if self.value() == "(" and self._looks_like_type(1):
+        if self.value() == "&" and self.peek()[0] == "punct" and self.peek(1)[0] == "name" \
+                and self.var_types.get(self.value(1)) in self.records:
+            # &account passes the struct itself, which a reference already is.
+            self.index += 1
+            return self._parse_postfix()
+
+        if self.value() == "*" and self.peek()[0] == "punct":
+            # *max_element(v.begin(), v.end()) is the largest element of v.
             start = self.index
             self.index += 1
-            cast = self._parse_type()
-            if self.accept(")"):
-                target = {"int": "int", "double": "float"}.get(cast)
-                if target:
-                    return TypeCast(target, self._parse_unary())
+            self._skip_namespace()
+            if self.value() in ("max_element", "min_element") and self.value(1) == "(":
+                call = self._parse_postfix()
+                if (isinstance(call, FunctionCall) and len(call.args) == 2
+                        and all(isinstance(a, MethodCall) and isinstance(a.obj, Identifier) for a in call.args)
+                        and [a.method for a in call.args] == ["begin", "end"]
+                        and call.args[0].obj.name == call.args[1].obj.name):
+                    return FunctionCall(call.name[:3], [call.args[0].obj])
             self.index = start
 
+        if self.value() in ("*", "&") and self.peek()[0] == "punct":
+            raise UnsupportedConstruct("pointer dereference and address-of")
+
+        if self.value() == "sizeof":
+            raise UnsupportedConstruct("sizeof")
+
+        if self.value() == "(" and self._looks_like_cast():
+            self.index += 1
+            cast = self._parse_type()
+            self.expect(")")
+            target = CASTS.get(cast)
+            if target is None:
+                raise UnsupportedConstruct(f"cast to {cast}")
+            return TypeCast(target, self._parse_unary())
+
         return self._parse_postfix()
+
+    def _looks_like_cast(self):
+        kind, text = self.peek(1)
+        if kind != "name":
+            return False
+        if text in PRIMITIVE_WORDS or text in ("const", "string") or text in self.records:
+            # (int) x, but not (n) * 2 for a variable n.
+            position = 1
+            while self.peek(position)[0] == "name" or self.value(position) in ("*", "&", "::"):
+                position += 1
+            return self.value(position) == ")"
+        return False
+
+    def _call_arguments(self):
+        args = []
+        while not self.at_end() and self.value() != ")":
+            if self.accept(","):
+                continue
+            args.append(self._parse_value())
+        return args
 
     def _parse_postfix(self):
 
@@ -761,22 +1185,23 @@ class CLikeParser:
         while not self.at_end():
 
             if self.accept("("):
-                args = []
-                while not self.at_end() and self.value() != ")":
-                    if self.accept(","):
-                        continue
-                    args.append(self._parse_expression())
-                self.accept(")")
+                args = self._call_arguments()
+                self.expect(")")
                 if isinstance(node, Identifier):
                     node = FunctionCall(node.name, args)
                 elif isinstance(node, AttributeAccess):
-                    node = MethodCall(node.obj, node.attribute, args)
+                    node = self._method(node.obj, node.attribute, args)
+                else:
+                    raise UnsupportedConstruct("calling the result of an expression")
                 continue
 
             if self.accept("["):
-                index = self._parse_expression()
-                self.accept("]")
+                index = self._parse_value()
+                self.expect("]")
                 node = IndexAccess(node, index)
+                if isinstance(node.obj, Identifier) and node.obj.name in self.c_strings:
+                    # Past the last character a C string reads as '\0'.
+                    node.c_string = True
                 continue
 
             if self.value() in (".", "->"):
@@ -786,49 +1211,82 @@ class CLikeParser:
                 continue
 
             if self.value() in ("++", "--"):
-                self.index += 1
+                operator = "Add" if self.next()[1] == "++" else "Sub"
+                node = _Step(node, operator)
                 continue
 
             break
 
         return node
 
+    @staticmethod
+    def _method(obj, member, args):
+        if member in ("length", "size") and not args:
+            return MethodCall(obj, "size", [])
+        return MethodCall(obj, member, args)
+
     def _parse_primary(self):
 
         kind, text = self.peek()
 
-        if text == "(":
+        if text == "(" and kind == "punct":
             self.index += 1
-            inner = self._parse_expression()
-            self.accept(")")
+            inner = self._parse_value()
+            self.expect(")")
             return inner
 
-        if text == "new":
+        if text == "new" and kind == "name":
             self.index += 1
             class_name = self.next()[1]
+            if self.value() == "[":
+                raise UnsupportedConstruct("new[] arrays")
             args = []
             if self.accept("("):
-                while not self.at_end() and self.value() != ")":
-                    if self.accept(","):
-                        continue
-                    args.append(self._parse_expression())
-                self.accept(")")
+                args = self._call_arguments()
+                self.expect(")")
             return ObjectCreation(class_name, args)
 
         if kind == "number":
             self.index += 1
-            return Constant(float(text) if "." in text else int(text))
+            return Constant(self._number(text))
 
         if kind == "string":
             self.index += 1
-            return Constant(self._unescape(text[1:-1]))
+            value = self._unescape(text[1:-1])
+            # "a" "b" is one literal in C.
+            while self.peek()[0] == "string":
+                value += self._unescape(self.next()[1][1:-1])
+            return Constant(value)
 
         if kind == "char":
             self.index += 1
-            return Constant(self._unescape(text[1:-1]))
+            node = Constant(self._unescape(text[1:-1]))
+            node.is_char = True
+            return node
 
         if kind == "name":
+            if text in CONTROL_KEYWORDS and text not in ("new",):
+                raise UnsupportedConstruct(f"'{text}' inside an expression")
+            if text in ("reinterpret_cast", "const_cast", "dynamic_cast"):
+                raise UnsupportedConstruct(text)
+            if text == "static_cast" and self.value(1) == "<":
+                self.index += 2
+                cast = self._parse_type()
+                self.expect(">")
+                self.expect("(")
+                value = self._parse_value()
+                self.expect(")")
+                if CASTS.get(cast) is None:
+                    raise UnsupportedConstruct(f"static_cast to {cast}")
+                return TypeCast(CASTS[cast], value)
             self.index += 1
+            if text in LIMITS:
+                return Constant(LIMITS[text])
+            if text == "strlen" and self.value() == "(":
+                self.index += 1
+                value = self._parse_value()
+                self.expect(")")
+                return MethodCall(value, "size", [])
             if text == "true":
                 return Constant(True)
             if text == "false":
@@ -841,14 +1299,32 @@ class CLikeParser:
                 text = self.next()[1]
             return Identifier(text)
 
-        self.index += 1
-        return Constant(None)
+        raise UnsupportedConstruct(f"unexpected '{text}' in an expression")
+
+    @staticmethod
+    def _number(text):
+        lowered = text.lower()
+        if lowered.startswith("0x"):
+            return int(lowered.rstrip("ul"), 16)
+        if any(c in lowered for c in ".e"):
+            return float(lowered.rstrip("fl"))
+        digits = lowered.rstrip("ul")
+        if len(digits) > 1 and digits.startswith("0"):
+            return int(digits, 8)
+        return int(digits)
 
     @staticmethod
     def _unescape(text):
-        return (
-            text.replace("\\n", "\n")
-            .replace("\\t", "\t")
-            .replace('\\"', '"')
-            .replace("\\\\", "\\")
-        )
+        escapes = {"n": "\n", "t": "\t", "r": "\r", "0": "\0", "\\": "\\",
+                   "'": "'", '"': '"', "a": "\a", "b": "\b", "f": "\f", "v": "\v"}
+        out = []
+        index = 0
+        while index < len(text):
+            char = text[index]
+            if char == "\\" and index + 1 < len(text):
+                out.append(escapes.get(text[index + 1], text[index + 1]))
+                index += 2
+                continue
+            out.append(char)
+            index += 1
+        return "".join(out)

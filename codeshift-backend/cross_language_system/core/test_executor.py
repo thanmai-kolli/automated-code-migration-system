@@ -151,7 +151,10 @@ class ProgramRunner:
             source = "program.c" if self.language == "c" else "program.cpp"
             self._write(source)
             binary = "program.exe" if os.name == "nt" else "program"
-            self._compile([compiler, source, "-o", binary])
+            # Pinned: newer compilers default to C23, which rejects K&R-style C
+            # that every older standard accepted.
+            standard = "-std=gnu17" if self.language == "c" else "-std=gnu++17"
+            self._compile([compiler, standard, source, "-o", binary])
             return [os.path.join(self.directory, binary)]
 
         raise RuntimeError(f"cannot execute language: {self.language}")

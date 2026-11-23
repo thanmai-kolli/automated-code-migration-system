@@ -1,15 +1,10 @@
 import sys
 import time
 import traceback
-from cross_language_system.core.dispatcher import CrossLanguageEngine
+from cross_language_system.core.dispatcher import CrossLanguageEngine, risk_level
 from cross_language_system.core.report_formatter import print_cross_report
 from cross_language_system.core.language_registry import LanguageRegistry
 from cross_language_system.ml.language_detector import MLLanguageDetector
-from cross_language_system.core.token_similarity import compute_token_similarity
-from cross_language_system.core.structure_similarity import compute_structure_similarity
-from cross_language_system.core.ast_similarity import compute_ast_similarity
-from cross_language_system.core.confidence_engine import ConfidenceEngine
-from cross_language_system.core.accuracy_engine import AccuracyEngine
 from cross_language_system.core.test_executor import run_test_cases
 # ------------------------------------------------------------
 # Read Multi-line Input
@@ -106,29 +101,11 @@ def run_cross_language_api(code, source=None, target=None, test_cases=None):
     try:
         start_time = time.perf_counter()
 
+        # The engine is the single place scores are computed, from the same
+        # features the models were trained on.
         result = engine.convert(code, source, target)
-        result["token_similarity"] = compute_token_similarity(code, result["code"])
-
-        result["structure_similarity"] = compute_structure_similarity(code, result["code"])
-
-        result["ast_similarity"] = compute_ast_similarity(code, result["code"])
-        token_similarity = compute_token_similarity(code, result["code"])
-        ast_similarity = compute_ast_similarity(code, result["code"])
-        structure_similarity = compute_structure_similarity(code, result["code"])
-        confidence_engine = ConfidenceEngine()
-        accuracy_engine = AccuracyEngine()
-        features = {
-            "diff_count": result.get("diff_count", 0),
-            "semantic_issues": len(result.get("semantic_issues", [])),
-            "compile_success": int(result.get("compile_success", False)),
-            "risk_score": result.get("risk_score", 0),
-            "token_similarity": token_similarity,
-            "ast_similarity": ast_similarity,
-            "structure_similarity": structure_similarity
-        }
-
-        result["confidence"] = confidence_engine.predict(features)
-        result["accuracy"] = round(accuracy_engine.predict(features),2)
+        if "error" in result:
+            return result
 
         test_results = run_test_cases(
             source, code, target, result.get("code", ""), test_cases
@@ -137,15 +114,16 @@ def run_cross_language_api(code, source=None, target=None, test_cases=None):
             result["test_results"] = test_results
             if test_results.get("enabled"):
                 result["test_success"] = test_results["failed"] == 0
+                if test_results["failed"]:
+                    result["risk_triggers"].append(
+                        f"{test_results['failed']} of {test_results['total']} test cases failed"
+                    )
+                    result["risk_score"] = len(result["risk_triggers"])
+                    result["risk_level"] = risk_level(
+                        result["compile_success"], result["risk_triggers"], tests_failed=True
+                    )
 
-        end_time = time.perf_counter()
-
-        time_taken_ms = round((end_time - start_time) * 1000)
-
-        if not result:
-            return {"error": "Conversion engine returned empty result."}
-
-        result["timeTakenMs"] = time_taken_ms
+        result["timeTakenMs"] = round((time.perf_counter() - start_time) * 1000)
 
         return result
 

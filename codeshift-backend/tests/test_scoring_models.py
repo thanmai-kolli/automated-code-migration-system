@@ -78,11 +78,17 @@ class TestDataset:
         assert (failed["behaviour_score"] == 0).all()
         assert (failed["correct"] == 0).all()
 
-    def test_risk_score_matches_the_serving_formula(self, data):
-        # dispatcher.convert sets risk_score = 1 if not compile_success else 0.
-        # Training must agree, or the model sees a feature it never sees live.
-        expected = 1 - data["compile_success"]
-        assert (data["risk_score"] == expected).all()
+    def test_risk_score_counts_the_compile_failure(self, data):
+        # risk_score is the number of risk triggers; a failed compile is one.
+        failed = data[data["compile_success"] == 0]
+        assert (failed["risk_score"] >= 1).all()
+
+    def test_serving_features_are_the_training_features(self):
+        # build_dataset.py stores result["features"] verbatim, so the only way
+        # to skew training against serving is for this dict to drift.
+        from cross_language_system.core.dispatcher import CrossLanguageEngine
+        result = CrossLanguageEngine().convert("print(1)\n", "python", "java")
+        assert list(result["features"]) == FEATURES
 
     def test_labels_are_not_all_the_same(self, data):
         # A degenerate dataset would make the metrics meaningless. Partial
@@ -155,3 +161,22 @@ class TestModelSize:
     def test_model_is_small(self, name):
         path = os.path.join(os.path.dirname(DATASET), name)
         assert os.path.getsize(path) < 1_000_000, f"{name} is unexpectedly large"
+
+
+class TestLanguageDetector:
+    """The saved model must load in the server, not only in the script that trained it."""
+
+    @pytest.fixture(scope="class")
+    def detector(self):
+        from cross_language_system.ml.language_detector import MLLanguageDetector
+        return MLLanguageDetector()
+
+    @pytest.mark.parametrize("code, language", [
+        ("x = int(input())\nprint(x * 2)\n", "python"),
+        ("public class Main {\n  public static void main(String[] a) {\n"
+         "    System.out.println(1);\n  }\n}\n", "java"),
+        ("#include <stdio.h>\nint main(void) {\n  printf(\"%d\\n\", 1);\n  return 0;\n}\n", "c"),
+        ("#include <iostream>\nint main() {\n  std::cout << 1 << std::endl;\n  return 0;\n}\n", "cpp"),
+    ])
+    def test_detects_each_language(self, detector, code, language):
+        assert detector.predict(code) == language

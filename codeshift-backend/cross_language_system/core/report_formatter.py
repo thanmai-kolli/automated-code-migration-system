@@ -13,7 +13,10 @@ def print_cross_report(result):
     if result.get("compile_errors"):
         print(f"Compile Details     : {result.get('compile_errors')}")
 
-    print(f"Confidence Score    : {result.get('confidence')* 100:.2f}%")
+    confidence = result.get("confidence")
+    shown = f"{confidence * 100:.2f}%" if confidence is not None else "unavailable"
+    print(f"Confidence Score    : {shown}")
+    print(f"Risk Level          : {result.get('risk_level')}")
 
     print("\nSEMANTIC ANALYSIS")
     print("-----------------")

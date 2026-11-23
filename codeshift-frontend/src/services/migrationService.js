@@ -11,13 +11,15 @@ function normalizeReport(data) {
     validationStatus: data.validation_status ?? null,
     testSuccess: data.test_success ?? null,
 
-    riskScore: data.risk_score ?? 0,
-    riskLevel: data.risk_level ?? "LOW",
+    riskScore: data.risk_score ?? null,
+    riskLevel: data.risk_level ?? "UNKNOWN",
     riskTriggers: data.risk_triggers ?? [],
+    appliedRules: data.applied_rules ?? [],
+    rejectedRules: data.rejected_rules ?? [],
 
-    confidence: data.confidence ?? data.confidence_score ?? 0,
+    confidence: data.confidence ?? null,
 
-    accuracy: data.accuracy ?? 0,   // ✅ ADD THIS
+    accuracy: data.accuracy ?? null,
 
     totalDiffChanges: data.total_diff_changes ?? data.diff_count ?? 0,
     diffText: data.diff_text ?? "",

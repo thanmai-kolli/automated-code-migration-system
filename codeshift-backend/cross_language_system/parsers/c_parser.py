@@ -5,6 +5,8 @@ import re
 
 C_FAMILY = {"c", "cpp", "c++"}
 
+CONTROL_WORDS = {"if", "while", "for", "switch", "else", "return", "sizeof", "do"}
+
 
 class CParser:
     """
@@ -99,6 +101,12 @@ class CParser:
         for match in matches:
 
             start = match.start()
+            # A match inside a function already taken is a nested block such as
+            # `else if (x) {`, not a function of its own.
+            if any(begin <= start < end for begin, end in used_ranges):
+                continue
+            if match.group(2) in CONTROL_WORDS:
+                continue
             brace_count = 0
             end = None
 

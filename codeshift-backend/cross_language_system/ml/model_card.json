@@ -1,0 +1,132 @@
+{
+  "dataset": {
+    "rows": 297,
+    "programs": 46,
+    "compiled": 282,
+    "correct": 275,
+    "features": [
+      "compile_success",
+      "risk_score",
+      "semantic_issues",
+      "diff_count",
+      "token_similarity",
+      "ast_similarity",
+      "structure_similarity",
+      "n_statements",
+      "n_functions",
+      "n_classes",
+      "n_loops",
+      "n_inputs",
+      "n_library_calls",
+      "n_collection_ops",
+      "n_string_ops",
+      "n_float_ops",
+      "n_helpers",
+      "source_python",
+      "source_java",
+      "source_c",
+      "source_cpp",
+      "target_python",
+      "target_java",
+      "target_c",
+      "target_cpp"
+    ]
+  },
+  "cv": {
+    "scheme": "GroupKFold(5) by program"
+  },
+  "confidence_model": {
+    "chosen": "logistic_regression[compile+library]",
+    "cv": {
+      "logistic_regression[all]": {
+        "Brier": 0.0261,
+        "ECE": 0.0138,
+        "accuracy": 0.9663,
+        "ROC_AUC": 0.954,
+        "ROC_AUC_compiled_only": 0.8675
+      },
+      "random_forest[all]": {
+        "Brier": 0.0336,
+        "ECE": 0.0556,
+        "accuracy": 0.9529,
+        "ROC_AUC": 0.9653,
+        "ROC_AUC_compiled_only": 0.8909
+      },
+      "random_forest_sigmoid[all]": {
+        "Brier": 0.0284,
+        "ECE": 0.0422,
+        "accuracy": 0.9428,
+        "ROC_AUC": 0.9519,
+        "ROC_AUC_compiled_only": 0.867
+      },
+      "logistic_regression[compile+library]": {
+        "Brier": 0.016,
+        "ECE": 0.0218,
+        "accuracy": 0.9832,
+        "ROC_AUC": 0.9577,
+        "ROC_AUC_compiled_only": 0.867
+      },
+      "random_forest[compile+library]": {
+        "Brier": 0.0288,
+        "ECE": 0.0426,
+        "accuracy": 0.9428,
+        "ROC_AUC": 0.9714,
+        "ROC_AUC_compiled_only": 0.9335
+      },
+      "random_forest_sigmoid[compile+library]": {
+        "Brier": 0.0355,
+        "ECE": 0.0561,
+        "accuracy": 0.9394,
+        "ROC_AUC": 0.9579,
+        "ROC_AUC_compiled_only": 0.9029
+      },
+      "compile_only (baseline)": {
+        "Brier": 0.023,
+        "ECE": 0.0001,
+        "accuracy": 0.9764,
+        "ROC_AUC": 0.8103,
+        "ROC_AUC_compiled_only": 0.4039
+      },
+      "class_prior (baseline)": {
+        "Brier": 0.0693,
+        "ECE": 0.0,
+        "accuracy": 0.9259,
+        "ROC_AUC": 0.362,
+        "ROC_AUC_compiled_only": 0.4319
+      }
+    }
+  },
+  "accuracy_model": {
+    "chosen": "100 x confidence model",
+    "cv": {
+      "ridge[all]": {
+        "MAE": 7.046,
+        "R2": 0.685
+      },
+      "random_forest[all]": {
+        "MAE": 5.486,
+        "R2": 0.625
+      },
+      "ridge[compile+library]": {
+        "MAE": 5.23,
+        "R2": 0.716
+      },
+      "random_forest[compile+library]": {
+        "MAE": 5.058,
+        "R2": 0.611
+      },
+      "compile_only (baseline)": {
+        "MAE": 4.607,
+        "R2": 0.664
+      },
+      "mean (baseline)": {
+        "MAE": 13.779,
+        "R2": -0.01
+      },
+      "100 x confidence model": {
+        "MAE": 3.884,
+        "R2": 0.767
+      }
+    }
+  }
+}

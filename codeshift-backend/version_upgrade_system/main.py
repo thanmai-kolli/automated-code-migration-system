@@ -1,12 +1,6 @@
 import time
 import traceback
 from version_upgrade_system.core.upgrade_engine import UpgradeEngine
-from cross_language_system.core.token_similarity import compute_token_similarity
-from cross_language_system.core.structure_similarity import compute_structure_similarity
-from cross_language_system.core.ast_similarity import compute_ast_similarity
-from cross_language_system.core.confidence_engine import ConfidenceEngine
-from cross_language_system.core.accuracy_engine import AccuracyEngine
-from cross_language_system.core.test_executor import run_test_cases
 # ------------------------------------------------------------
 # Read multi-line input
 # ------------------------------------------------------------
@@ -42,7 +36,7 @@ def print_report(result):
     print(f"Engine Used        : {result.get('engine', 'N/A')}")
     print(f"Detected Version   : {result.get('detected_version', 'Unknown')}")
 
-    compile_status = "SUCCESS" if result.get("compile_success") else "FAILED"
+    compile_status = {True: "SUCCESS", False: "FAILED", None: "NOT CHECKED"}[result.get("compile_success")]
     print(f"Compile Status     : {compile_status}")
 
     if result.get("compile_errors"):
@@ -55,13 +49,16 @@ def print_report(result):
         test_status = "PASSED" if result.get("test_success") else "FAILED"
         print(f"Test Execution     : {test_status}")
 
-    # if "confidence_score" in result:
-    #     print(f"Confidence Score   : {result.get('confidence_score')}%")
-    confidence = result.get("confidence_score")
-    if confidence is not None:
-        print(f"Confidence Score   : {confidence}%")
-    else:
-        print("Confidence Score   : Not Available")
+    print()
+
+    # ---------------- RULES ----------------
+    print("RULES")
+    print("-----")
+    for title, key in (("Applied", "applied_rules"), ("Rejected", "rejected_rules")):
+        rules = result.get(key, [])
+        print(f"{title + ':':<19}{' None' if not rules else ''}")
+        for rule in rules:
+            print(f"                     - {rule}")
 
     print()
 
@@ -79,22 +76,6 @@ def print_report(result):
             print(f"                     - {t}")
     else:
         print("Risk Triggers      : None")
-
-    print()
-
-    # ---------------- SYMBOL ANALYSIS ----------------
-    print("SYMBOL ANALYSIS")
-    print("---------------")
-
-    symbols = result.get("symbols", {})
-    if symbols:
-        for key, values in symbols.items():
-            if values:
-                print(f"{key.capitalize():<20}: {', '.join(values)}")
-            else:
-                print(f"{key.capitalize():<20}: None")
-    else:
-        print("No symbol data available")
 
     print()
 
@@ -127,25 +108,7 @@ def main():
     language = input("\nEnter language (python/java/cpp/c): ").strip().lower()
 
     try:
-
-        # ---------------- PYTHON ----------------
-        if language == "python":
-
-            result = engine.upgrade(code, language)
-
-        # ---------------- JAVA ----------------
-        elif language == "java":
-            result = engine.upgrade(code, language)
-
-        # ---------------- C++ ----------------
-        elif language == "cpp":
-            result = engine.upgrade(code, language)
-        elif language == "c":
-            result = engine.upgrade(code,language)
-        else:
-            print("Unsupported language.")
-            return
-
+        result = engine.upgrade(code, language)
     except Exception:
         print("\n❌ Engine execution failed:")
         traceback.print_exc()
@@ -189,51 +152,17 @@ def run_version_upgrade_api(code, language, test_cases=None):
         return {"error": "Unsupported language."}
 
     try:
-        start_time = time.perf_counter()   # 🔥 START TIMER
+        start_time = time.perf_counter()
 
-        result = engine.upgrade(code, language)
+        result = engine.upgrade(code, language, test_cases)
 
-        # Compute similarities
-        token_sim = compute_token_similarity(code, result["code"])
-        structure_sim = compute_structure_similarity(code, result["code"])
-        ast_sim = compute_ast_similarity(code, result["code"])
+        # Only measured values are reported: the cross-language scoring models were
+        # trained on translations, not on upgrades.
+        tests = result.get("test_results")
+        if tests and tests.get("enabled") and tests.get("total"):
+            result["accuracy"] = round(100.0 * tests["passed"] / tests["total"], 2)
 
-        result["token_similarity"] = token_sim
-        result["structure_similarity"] = structure_sim
-        result["ast_similarity"] = ast_sim
-
-        # ML Engines
-        confidence_engine = ConfidenceEngine()
-        accuracy_engine = AccuracyEngine()
-
-        features = {
-            "diff_count": result.get("total_diff_changes", 0),
-            "semantic_issues": len(result.get("semantic_issues", [])),
-            "compile_success": int(result.get("compile_success", False)),
-            "risk_score": result.get("risk_score", 0),
-            "token_similarity": token_sim,
-            "ast_similarity": ast_sim,
-            "structure_similarity": structure_sim
-        }
-
-        result["confidence"] = confidence_engine.predict(features)
-        result["accuracy"] = round(accuracy_engine.predict(features),2)
-
-        # Upgrades stay in the same language, so both runs use it.
-        test_results = run_test_cases(
-            language, code, language, result.get("code", ""), test_cases
-        )
-        if test_results:
-            result["test_results"] = test_results
-            if test_results.get("enabled"):
-                result["test_success"] = test_results["failed"] == 0
-
-        end_time = time.perf_counter()     # 🔥 END TIMER
-
-        time_taken_ms = round((end_time - start_time) * 1000)
-
-        # 🔥 Attach time to result
-        result["timeTakenMs"] = time_taken_ms
+        result["timeTakenMs"] = round((time.perf_counter() - start_time) * 1000)
 
     except Exception:
         traceback.print_exc()

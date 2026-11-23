@@ -1,6 +1,76 @@
 import re
+
+from cross_language_system.core import precedence as prec
+from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
+from cross_language_system.core.printf_format import tokens as format_tokens
 from cross_language_system.generators.c_family import CFamilyGenerator
+
+LANG = "c"
+
+FORMAT_HELPER = (
+    "static string _format(const char *fmt, ...) {\n"
+    "    char buffer[1024];\n"
+    "    va_list args;\n"
+    "    va_start(args, fmt);\n"
+    "    vsnprintf(buffer, sizeof buffer, fmt, args);\n"
+    "    va_end(args);\n"
+    "    return string(buffer);\n"
+    "}\n\n"
+)
+
+SPLIT_HELPER = (
+    "vector<string> _split(const string& text) {\n"
+    "    vector<string> parts;\n"
+    "    istringstream stream(text);\n"
+    "    string token;\n"
+    "    while (stream >> token) parts.push_back(token);\n"
+    "    return parts;\n"
+    "}\n\n"
+)
+
+READ_LINE_HELPER = (
+    "static string _read_line() {\n"
+    "    string line;\n"
+    "    getline(cin, line);\n"
+    "    if (!line.empty() && line.back() == '\\r') line.pop_back();\n"
+    "    return line;\n"
+    "}\n\n"
+)
+
+INPUT_HELPER = (
+    "static string _input(const string& prompt) {\n"
+    "    cout << prompt;\n"
+    "    return _read_line();\n"
+    "}\n\n"
+)
+
+# Python string methods C++'s std::string lacks.
+STRING_HELPERS = {
+    "strip": (
+        "static string _strip(const string& s) {\n"
+        "    size_t start = s.find_first_not_of(\" \\t\\r\\n\");\n"
+        "    if (start == string::npos) return \"\";\n"
+        "    size_t end = s.find_last_not_of(\" \\t\\r\\n\");\n"
+        "    return s.substr(start, end - start + 1);\n"
+        "}\n\n"
+    ),
+    "lower": (
+        "static string _lower(string s) {\n"
+        "    for (char& c : s) c = (char) tolower((unsigned char) c);\n"
+        "    return s;\n"
+        "}\n\n"
+    ),
+    "upper": (
+        "static string _upper(string s) {\n"
+        "    for (char& c : s) c = (char) toupper((unsigned char) c);\n"
+        "    return s;\n"
+        "}\n\n"
+    ),
+}
+
+# printf conversions that cout prints identically, so the call can become <<.
+STREAMABLE = re.compile(r"%(l{0,2})([dis])")
 
 
 class CppGenerator(CFamilyGenerator):
@@ -14,7 +84,7 @@ class CppGenerator(CFamilyGenerator):
 
         # The C parser emits raw source chunks; everything else emits a real IR.
         if any(isinstance(getattr(n, "body", None), str) for n in program.body):
-            return "".join(self._convert_block(n.body) for n in program.body)
+            return self._convert_text(program)
 
         return self.generate_from_ir(program)
 
@@ -24,62 +94,299 @@ class CppGenerator(CFamilyGenerator):
 
     def headers(self, program, body):
 
+        helpers = self.helper_code()
+        text = body + helpers
         code = "#include <iostream>\n#include <string>\n#include <vector>\n#include <map>\n"
 
-        if "_split(" in body:
+        if "_split(" in text:
             code += "#include <sstream>\n"
-
-        if "pow(" in body:
+        if re.search(r"\b(printf|snprintf|vsnprintf)\(", text):
+            code += "#include <cstdio>\n"
+        if "va_list" in text:
+            code += "#include <cstdarg>\n"
+        if re.search(r"\b(strtod|atoi|atof|atoll)\(", text):
+            code += "#include <cstdlib>\n"
+        if re.search(r"\b(strchr|memcpy|strlen)\(", text):
+            code += "#include <cstring>\n"
+        if re.search(r"\b(pow|sqrt|floor|ceil|fmod|isnan|isinf)\(", text):
             code += "#include <cmath>\n"
+        if re.search(r"\b(max|min|find|sort|max_element|min_element)\(", text):
+            code += "#include <algorithm>\n"
+        if "accumulate(" in text:
+            code += "#include <numeric>\n"
+        if re.search(r"\b(isupper|islower|isdigit|isalpha|isspace|isalnum|toupper|tolower)\(", text):
+            code += "#include <cctype>\n"
 
-        code += "using namespace std;\n\n"
+        return code + "using namespace std;\n\n"
 
-        if "_split(" in body:
-            code += (
-                "vector<string> _split(const string& text) {\n"
-                "    vector<string> parts;\n"
-                "    istringstream stream(text);\n"
-                "    string token;\n"
-                "    while (stream >> token) parts.push_back(token);\n"
-                "    return parts;\n"
-                "}\n\n"
-            )
-
+    def helper_code(self):
+        code = super().helper_code()
+        if "format" in self.helpers:
+            code += FORMAT_HELPER
+        if "split" in self.helpers:
+            code += SPLIT_HELPER
+        if "input" in self.helpers:
+            self.helpers.add("read_line")
+        if "read_line" in self.helpers:
+            code += READ_LINE_HELPER
+        if "input" in self.helpers:
+            code += INPUT_HELPER
+        for name, helper in STRING_HELPERS.items():
+            if f"string_{name}" in self.helpers:
+                code += helper
         return code
+
+    def double_text_helper(self):
+        return (
+            "static string _fmt_double(double x) {\n"
+            "    char out[40];\n"
+            "    _format_double(x, out);\n"
+            "    return string(out);\n"
+            "}\n\n"
+        )
+
+    def double_text(self, code):
+        return f"_fmt_double({code})"
+
+    def c_string(self, code, node):
+        # printf's %s needs a const char*, not a std::string.
+        if isinstance(node, Constant):
+            return code
+        return f"{prec.postfix_operand(code, node, LANG)}.c_str()"
 
     def method_call(self, node):
 
         # C++ has no string::split, so the generator supplies one.
         if node.method == "split" and not node.args:
+            self.helpers.add("split")
             return f"_split({self.expr(node.obj)})"
+
+        if node.method in STRING_HELPERS and not node.args:
+            self.helpers.add(f"string_{node.method}")
+            return f"_{node.method}({self.expr(node.obj)})"
+
+        receiver = prec.postfix_operand(self.expr(node.obj), node.obj, LANG)
+        if isinstance(node.obj, Constant) and isinstance(node.obj.value, str):
+            # A literal is a char array; only std::string has methods.
+            receiver = f"string({receiver})"
+        if node.method == "find" and len(node.args) == 1:
+            # Java's indexOf and Python's find give -1, not npos, when absent.
+            return f"(int) {receiver}.find({self.expr(node.args[0])})"
+        if node.method == "sort" and not node.args:
+            return f"sort({receiver}.begin(), {receiver}.end())"
+        if node.method == "substring" and len(node.args) == 2:
+            start = self.expr(node.args[0])
+            end = prec.operand(self.expr(node.args[1]), node.args[1], "Sub", LANG)
+            return f"{receiver}.substr({start}, {end} - {prec.operand(start, node.args[0], 'Sub', LANG, right=True)})"
+        if node.method == "substring" and len(node.args) == 1:
+            return f"{receiver}.substr({self.expr(node.args[0])})"
+        if node.method == "startswith" and len(node.args) == 1:
+            return f"({receiver}.rfind({self.expr(node.args[0])}, 0) == 0)"
 
         return super().method_call(node)
 
-    def interpolation(self, node):
+    # ---- input ----
+
+    def _line(self, node):
+        if node.prompt is not None:
+            self.helpers.add("input")
+            return f"_input({self.expr(node.prompt)})"
+        self.helpers.add("read_line")
+        return "_read_line()"
+
+    def read_expression(self, node):
+
+        if self.line_based(node):
+            line = self._line(node)
+            return {"int": f"stoi({line})", "long": f"stoll({line})",
+                    "double": f"stod({line})"}.get(node.value_type, line)
+
+        kind = {"int": "int", "long": "long long", "double": "double",
+                "token": "string", "char": "char"}.get(node.value_type)
+        if kind is None:
+            return self._line(node)
+        # An immediately-invoked lambda lets a read work as an expression.
+        return f"[]{{ {kind} _v; cin >> _v; return _v; }}()"
+
+    def read_statement(self, node, indent):
+        tab = "    " * indent
+        if node.value_type == "eol":
+            return f"{tab}{{ string _rest; getline(cin, _rest); }}\n"
+        return f"{tab}{self.read_expression(node)};\n"
+
+    # ---- strings ----
+
+    def to_text(self, node):
+        """std::string spelling of a value, as the source would print it."""
+
+        code = self.expr(node)
+        kind = self._type(node)
+
+        if kind == "String":
+            return code
+        if kind == "char":
+            return f"string(1, {code})"
+        if kind == "boolean":
+            words = ('"True"', '"False"') if self.source == "python" else ('"true"', '"false"')
+            return f"string({prec.ternary_part(code, node)} ? {words[0]} : {words[1]})"
+        if kind == "double":
+            if self.source in ("python", "java"):
+                self.helpers.add("fmt_double")
+                return f"_fmt_double({code})"
+            return f"_format(\"%g\", {code})"
+        if kind in ("int", "long"):
+            return f"to_string({code})"
+        raise UnsupportedConstruct(f"converting '{code}' to a string: its type is unknown")
+
+    def concatenate(self, node):
 
         parts = []
+
+        def collect(item):
+            if isinstance(item, BinaryOp) and item.operator == "Add" and self._type(item) == "String":
+                collect(item.left)
+                collect(item.right)
+            else:
+                parts.append(item)
+
+        collect(node)
+
+        rendered = []
+        for index, part in enumerate(parts):
+            if isinstance(part, Constant) and isinstance(part.value, str) and not getattr(part, "is_char", False):
+                text = self.constant(part.value)
+                # "a" + "b" would add two pointers.
+                rendered.append(f"string({text})" if index == 0 else text)
+            elif self._type(part) == "String":
+                rendered.append(prec.operand(self.expr(part), part, "Add", LANG, right=index > 0))
+            else:
+                rendered.append(self.to_text(part))
+        return " + ".join(rendered)
+
+    def interpolation(self, node):
+
+        pieces = []
         for part in node.parts:
             if isinstance(part, Constant) and isinstance(part.value, str):
                 if part.value:
-                    parts.append(self.constant(part.value))
+                    pieces.append(self.constant(part.value))
+            elif isinstance(part, FormatString):
+                pieces.append(self.format_string(part))
             else:
-                parts.append(f"to_string({self.expr(part)})")
+                pieces.append(self.to_text(part))
 
-        return " + ".join(parts) if parts else '""'
+        if not pieces:
+            return 'string("")'
+        if pieces[0].startswith('"'):
+            pieces[0] = f"string({pieces[0]})"
+        return " + ".join(pieces)
+
+    def format_string(self, node):
+        fmt, values = self.c_format(node.fmt, node.args)
+        self.helpers.add("format")
+        return f"_format({self.string_literal(fmt)}{''.join(', ' + v for v in values)})"
+
+    def membership(self, node):
+
+        container = self.expr(node.right)
+        needle = self.expr(node.left)
+        kind = self._type(node.right) or ""
+
+        if isinstance(node.right, Constant) and isinstance(node.right.value, str):
+            container = f"string({container})"
+
+        if kind == "String":
+            test = f"{prec.postfix_operand(container, node.right, LANG)}.find({needle}) != string::npos"
+        elif kind.startswith(("Set<", "Map<")):
+            test = f"{prec.postfix_operand(container, node.right, LANG)}.count({needle}) > 0"
+        elif kind.startswith("List<"):
+            receiver = prec.postfix_operand(container, node.right, LANG)
+            test = f"find({receiver}.begin(), {receiver}.end(), {needle}) != {receiver}.end()"
+        else:
+            raise UnsupportedConstruct("the in operator on a value of unknown type")
+
+        return test if node.operator == "In" else f"!({test})"
+
+    def call(self, node):
+        if node.name == "range_array":
+            if len(node.args) != 1:
+                raise UnsupportedConstruct("multi-dimensional arrays in C++ output")
+            element = self.type_of(getattr(node, "element_type", None) or "int")
+            if element == "auto":
+                element = "int"
+            return f"vector<{element}>({self.expr(node.args[0])})"
+        if node.name in ("min", "max", "sum") and len(node.args) == 1:
+            container = prec.postfix_operand(self.expr(node.args[0]), node.args[0], LANG)
+            if node.name == "sum":
+                zero = "0.0" if self._type(node) == "double" else "0"
+                return f"accumulate({container}.begin(), {container}.end(), {zero})"
+            return f"*{node.name}_element({container}.begin(), {container}.end())"
+        return super().call(node)
+
+    # ---- output ----
 
     def print_statement(self, stmt, indent):
 
         tab = "    " * indent
-        if not stmt.args:
-            return f"{tab}cout << endl;\n"
+        args = list(stmt.args)
 
-        pieces = ' << " " << '.join(self.expr(a) for a in stmt.args)
-        return f"{tab}cout << {pieces} << endl;\n"
+        # printf(...) alone keeps its exact formatting.
+        if len(args) == 1 and isinstance(args[0], FormatString):
+            fmt, values = self.c_format(args[0].fmt, args[0].args)
+            fmt += stmt.end.replace("%", "%%")
+            return f"{tab}printf({self.string_literal(fmt)}{''.join(', ' + v for v in values)});\n"
 
-    def read_into(self, target, rendered_type, indent, value_type):
+        end = stmt.end
+        if end == "" and args and isinstance(args[-1], Constant) and args[-1].value == "\n":
+            args = args[:-1]
+            end = "\n"
+
+        pieces = []
+        for index, arg in enumerate(args):
+            if index and stmt.sep:
+                pieces.append(self.constant(stmt.sep))
+            pieces.append(self._stream_piece(arg))
+
+        if end == "\n":
+            pieces.append("endl")
+        elif end:
+            pieces.append(self.constant(end))
+
+        if not pieces:
+            return ""
+        return f"{tab}cout << {' << '.join(pieces)};\n"
+
+    def _stream_piece(self, node):
+
+        kind = self._type(node)
+
+        # A concatenation or f-string streams piece by piece.
+        if isinstance(node, BinaryOp) and node.operator == "Add" and kind == "String":
+            return f"{self._stream_piece(node.left)} << {self._stream_piece(node.right)}"
+        if isinstance(node, StringInterpolation):
+            parts = [p for p in node.parts if not (isinstance(p, Constant) and p.value == "")]
+            return " << ".join(self._stream_piece(p) for p in parts) if parts else '""'
+
+        if isinstance(node, FormatString):
+            return self.format_string(node)
+        if kind == "boolean" and self.source in ("python", "java"):
+            words = ('"True"', '"False"') if self.source == "python" else ('"true"', '"false"')
+            return f"({prec.ternary_part(self.expr(node), node)} ? {words[0]} : {words[1]})"
+        if kind == "double" and self.source in ("python", "java"):
+            self.helpers.add("fmt_double")
+            return f"_fmt_double({self.expr(node)})"
+        if isinstance(node, Constant) and node.value is None:
+            return self.constant("None" if self.source == "python" else "null")
+
+        # << binds tighter than comparisons, logic and ?:, so those need grouping.
+        return prec.operand(self.expr(node), node, "LShift", LANG, right=True)
+
+    def read_into(self, target, rendered_type, indent, node):
         tab = "    " * indent
+        if self.line_based(node):
+            return f"{tab}{target} = {self.read_expression(node)};\n"
         # Only a whole-line read uses getline; a token read must stop at whitespace.
-        if value_type == "String":
+        if node.value_type == "String":
             return f"{tab}getline(cin, {target});\n"
         return f"{tab}cin >> {target};\n"
 
@@ -149,9 +456,24 @@ class CppGenerator(CFamilyGenerator):
 
         self.scope = outer_scope
         return code + f"{tab}}}\n\n"
+
     # -----------------------------------------
     # Convert C constructs to C++ (text path)
     # -----------------------------------------
+
+    def _convert_text(self, program):
+
+        self.converted_allocations = set()
+        code = "".join(self._convert_block(n.body) for n in program.body)
+
+        # Anything still calling the C stdio functions needs their header.
+        if re.search(r"\b(printf|scanf|puts|putchar|getchar|fgets)\s*\(", code) and "<cstdio>" not in code:
+            if "#include <iostream>" in code:
+                code = code.replace("#include <iostream>", "#include <iostream>\n#include <cstdio>", 1)
+            else:
+                code = "#include <cstdio>\n" + code
+        return code
+
     def _convert_block(self, text):
 
         code = text
@@ -162,6 +484,8 @@ class CppGenerator(CFamilyGenerator):
         code = code.replace("<stdio.h>", "<iostream>")
         code = code.replace("<stdlib.h>", "<cstdlib>")
         code = code.replace("<string.h>", "<cstring>")
+        code = code.replace("<math.h>", "<cmath>")
+        code = code.replace("<stdbool.h>", "<cstdbool>")
 
         if "#include <iostream>" in code and "using namespace std;" not in code:
             code = code.replace(
@@ -170,71 +494,65 @@ class CppGenerator(CFamilyGenerator):
             )
 
         # ------------------------------
-        # printf → cout
+        # printf → cout, only where cout prints exactly the same text
         # ------------------------------
         code = re.sub(
-            r'printf\("([^"]*)"(?:,\s*(.*?))?\);',
+            r'\bprintf\s*\(\s*"((?:\\.|[^"\\])*)"\s*((?:,[^;]*)?)\)\s*;',
             self._convert_printf,
             code
         )
 
         # ------------------------------
-        # scanf → cin
+        # scanf → cin, for plain numeric and word reads
         # ------------------------------
         code = re.sub(
-            r'scanf\("([^"]*)",\s*(.*?)\);',
+            r'\bscanf\s*\(\s*"((?:\\.|[^"\\])*)"\s*((?:,[^;]*)?)\)\s*;',
             self._convert_scanf,
             code
         )
 
         # ------------------------------
-        # malloc → new
+        # malloc → new, and free → delete[] only for those allocations
         # ------------------------------
+        def to_new(match):
+            self.converted_allocations.add(match.group(1))
+            return f"{match.group(1)} = new {match.group(2)}[{match.group(3)}];"
+
         code = re.sub(
             r'(\w+)\s*=\s*\((\w+)\*\)\s*malloc\(sizeof\(\w+\)\s*\*\s*(\w+)\);',
-            r'\1 = new \2[\3];',
+            to_new,
             code
         )
+
+        def to_zeroed_new(match):
+            self.converted_allocations.add(match.group(1))
+            return f"{match.group(1)} = new {match.group(2)}[{match.group(3)}]();"
 
         code = re.sub(
             r'(\w+)\s*=\s*\((\w+)\*\)\s*calloc\((\w+),\s*sizeof\(\w+\)\);',
-            r'\1 = new \2[\3]();',
+            to_zeroed_new,
             code
         )
 
-        # ------------------------------
-        # free → delete[]
-        # ------------------------------
         code = re.sub(
-            r'free\((\w+)\);',
-            r'delete[] \1;',
+            r'\bfree\((\w+)\);',
+            lambda m: f"delete[] {m.group(1)};" if m.group(1) in self.converted_allocations else m.group(0),
             code
         )
 
         # ------------------------------
-        # NULL → nullptr
+        # NULL → nullptr (outside string literals)
         # ------------------------------
-        code = code.replace("NULL", "nullptr")
-
-        # ------------------------------
-        # gets → getline
-        # ------------------------------
-        code = re.sub(
-            r'gets\((\w+)\);',
-            r'getline(cin, \1);',
-            code
-        )
+        code = _outside_strings(code, lambda chunk: re.sub(r"\bNULL\b", "nullptr", chunk))
 
         # ------------------------------
         # puts → cout
         # ------------------------------
         code = re.sub(
-            r'puts\("([^"]*)"\);',
+            r'\bputs\("((?:\\.|[^"\\])*)"\);',
             r'cout << "\1" << endl;',
             code
         )
-
-        
 
         return code + "\n\n"
 
@@ -244,40 +562,95 @@ class CppGenerator(CFamilyGenerator):
     def _convert_printf(self, match):
 
         format_string = match.group(1)
-        variables = match.group(2)
+        arguments = _split_arguments(match.group(2)[1:]) if match.group(2).strip() else []
 
-        parts = re.split(r'(%[dfs])', format_string)
+        try:
+            pieces = format_tokens(format_string)
+        except UnsupportedConstruct:
+            return match.group(0)
+
+        specs = [p for p in pieces if isinstance(p, dict) and p["conv"] != "%"]
+        simple = all(
+            p["conv"] in "dis" and not p["flags"] and not p["width"] and p["precision"] is None
+            and p["length"] in (None, "l", "ll")
+            for p in specs
+        )
+        # %f, %.2f, widths, %c, %u ... print differently through cout.
+        if not simple or len(specs) != len(arguments):
+            return match.group(0)
+
         result = "cout"
-
-        var_list = []
-        if variables:
-            var_list = [v.strip() for v in variables.split(",")]
-
-        var_index = 0
-
-        for part in parts:
-            if part in ("%d", "%f", "%s"):
-                if var_index < len(var_list):
-                    result += f" << {var_list[var_index]}"
-                    var_index += 1
+        index = 0
+        for piece in pieces:
+            if isinstance(piece, str):
+                result += f' << "{piece}"'
+            elif piece["conv"] == "%":
+                result += ' << "%"'
             else:
-                if part:
-                    result += f' << "{part}"'
+                argument = arguments[index]
+                # << binds tighter than &, |, ^, comparisons and ?:.
+                if not re.fullmatch(r"[\w.]+(\[[^\]]*\])*(\([^()]*\))?", argument):
+                    argument = f"({argument})"
+                result += f" << {argument}"
+                index += 1
 
-        result += ";"
-        return result
+        return (result if result != "cout" else 'cout << ""') + ";"
 
     # -----------------------------------------
     # scanf conversion
     # -----------------------------------------
     def _convert_scanf(self, match):
 
-        variables = match.group(2)
-        var_list = [v.strip().replace("&", "") for v in variables.split(",")]
+        arguments = _split_arguments(match.group(2)[1:]) if match.group(2).strip() else []
+        try:
+            pieces = format_tokens(match.group(1))
+        except UnsupportedConstruct:
+            return match.group(0)
 
-        result = "cin"
-        for var in var_list:
-            result += f" >> {var}"
+        specs = [p for p in pieces if isinstance(p, dict)]
+        literal = "".join(p for p in pieces if isinstance(p, str))
+        if (literal.strip() or len(specs) != len(arguments)
+                or any(p["conv"] not in "dfs" or p["width"] or p["flags"] for p in specs)
+                or not all(a.startswith("&") or p["conv"] == "s" for a, p in zip(arguments, specs))):
+            return match.group(0)
 
-        result += ";"
-        return result
+        targets = [a.lstrip("&").strip() for a in arguments]
+        return "cin >> " + " >> ".join(targets) + ";"
+
+
+def _split_arguments(text):
+    """Split call arguments at top-level commas."""
+
+    parts = []
+    depth = 0
+    current = ""
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char in "\"'":
+            end = index + 1
+            while end < len(text) and text[end] != char:
+                end += 2 if text[end] == "\\" else 1
+            current += text[index:end + 1]
+            index = end + 1
+            continue
+        if char in "([{":
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+        if char == "," and depth == 0:
+            parts.append(current.strip())
+            current = ""
+        else:
+            current += char
+        index += 1
+    if current.strip():
+        parts.append(current.strip())
+    return parts
+
+
+def _outside_strings(code, transform):
+    """Apply transform to everything except string and char literals."""
+
+    pieces = re.split(r'("(?:\\.|[^"\\])*"|\'(?:\\.|[^\'\\])\')', code)
+    return "".join(piece if index % 2 else transform(piece) for index, piece in enumerate(pieces))

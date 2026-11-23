@@ -6,6 +6,9 @@ Programs are deliberately varied — arithmetic, loops, strings, collections,
 classes — so the measured dataset covers easy and hard constructs alike.
 """
 
+import json
+import os
+
 CORPUS = {
 
     # ------------------------------------------------------------------
@@ -727,3 +730,24 @@ def iter_programs():
 
 def program_count():
     return sum(len(v) for v in CORPUS.values())
+
+
+EXTRA_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "corpus_extra.json")
+
+
+def extra_programs():
+    """Programs from the evaluation's B2 and B3 sets, used as extra training data.
+
+    B2 was a held-out benchmark until its failures were used to fix the engine;
+    from then on it is development data. B3 holds legacy-style Java, C and C++.
+    """
+    with open(EXTRA_PATH, encoding="utf-8") as handle:
+        extra = json.load(handle)
+    for language, programs in extra.items():
+        for program in programs:
+            yield language, program
+
+
+def iter_training_programs():
+    yield from iter_programs()
+    yield from extra_programs()

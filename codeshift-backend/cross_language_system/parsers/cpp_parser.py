@@ -80,8 +80,16 @@ class CppParser:
         function_pattern = r'([a-zA-Z_][\w\s:<>\*&]*?)\s+([a-zA-Z_]\w*)\s*\([^)]*\)\s*\{'
         matches = list(re.finditer(function_pattern, cleaned_code))
 
+        function_ranges = []
+
         for match in matches:
             start = match.start()
+            # A match inside a function already taken is a nested block such as
+            # `else if (x) {`, not a function of its own.
+            if any(begin <= start < end for begin, end in function_ranges):
+                continue
+            if match.group(2) in ("if", "while", "for", "switch", "else", "return", "catch", "do"):
+                continue
             brace_count = 0
             end = None
 
@@ -97,6 +105,7 @@ class CppParser:
             if end:
                 func_text = cleaned_code[start:end]
                 blocks.append(func_text)
+                function_ranges.append((start, end))
 
         # -----------------------------
         # 4️⃣ Build IR

@@ -4,7 +4,7 @@ class SemanticAnalyzer:
     SUPPORTED_TOP_LEVEL = {
         "Function", "Class", "Variable", "Assignment", "AugAssign",
         "PrintStatement", "IfStatement", "ForLoop", "WhileLoop", "TryCatch",
-        "Break", "Continue", "Pass", "Return",
+        "Break", "Continue", "Pass", "Return", "Block",
         "FunctionCall", "MethodCall", "ListAppend", "DictPut",
     }
 

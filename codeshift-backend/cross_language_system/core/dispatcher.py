@@ -1,12 +1,36 @@
+import re
+
 from cross_language_system.core.language_registry import LanguageRegistry
+from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.semantic_analyzer import SemanticAnalyzer
 from cross_language_system.core.confidence_engine import ConfidenceEngine
 from cross_language_system.core.type_annotator import TypeAnnotator
 from cross_language_system.utils.diff_generator import DiffGenerator
 from cross_language_system.core.accuracy_engine import AccuracyEngine
+from cross_language_system.core.model_features import construct_profile, direction, helper_count
 from cross_language_system.core.token_similarity import compute_token_similarity
 from cross_language_system.core.ast_similarity import compute_ast_similarity
 from cross_language_system.core.structure_similarity import compute_structure_similarity
+
+
+def risk_level(compile_success, triggers, tests_failed=False):
+    if not compile_success or tests_failed:
+        return "HIGH"
+    return "MEDIUM" if triggers else "LOW"
+
+
+def _has_code(code, source):
+    """Whether the input holds anything beyond comments and preprocessor lines."""
+
+    stripped = re.sub(r"/\*.*?\*/", "", code, flags=re.DOTALL)
+    comment = "#" if source == "python" else "//"
+    lines = []
+    for line in stripped.splitlines():
+        line = line.split(comment, 1)[0].strip()
+        if line and not (source != "python" and line.startswith("#")):
+            lines.append(line)
+    return bool(lines)
+
 
 class CrossLanguageEngine:
 
@@ -28,21 +52,26 @@ class CrossLanguageEngine:
         generator = self._get_generator(source, target)
         validator = self._get_validator(target)
 
-        # Build IR
-        ir = parser.parse(code)
-        if ir is None:
-            return {"error": "Parsing failed. IR is None."}
+        # Parse, type and generate. A construct the engine cannot translate
+        # faithfully is reported, never approximated.
+        try:
+            ir = parser.parse(code)
+            if ir is None:
+                return {"error": "Parsing failed. IR is None."}
+            if not ir.body and _has_code(code, source):
+                return {"error": f"Nothing in this {source} program could be translated."}
 
-        # Resolve concrete types before generation so statically typed targets
-        # do not have to fall back to Object.
-        TypeAnnotator().annotate(ir)
+            # Resolve concrete types before generation so statically typed
+            # targets do not have to fall back to Object.
+            TypeAnnotator(source).annotate(ir)
 
-        # Semantic validation
-        analyzer = SemanticAnalyzer()
-        semantic_issues = analyzer.analyze(ir, source, target)
+            semantic_issues = SemanticAnalyzer().analyze(ir, source, target)
+            generated_code = generator.generate(ir)
+        except UnsupportedConstruct as exc:
+            return {"error": f"Cannot translate this program faithfully: {exc}."}
+        except SyntaxError as exc:
+            return {"error": f"The {source} program could not be parsed: {exc.msg if hasattr(exc, 'msg') and exc.msg else exc}"}
 
-        # Generate target code
-        generated_code = generator.generate(ir)
         if not generated_code:
             return {"error": "Code generation failed."}
 
@@ -50,27 +79,33 @@ class CrossLanguageEngine:
         compile_success, compile_errors = validator.validate(generated_code)
         compile_flag = 1 if compile_success else 0
 
+        risk_triggers = [] if compile_success else ["Generated code does not compile"]
+        risk_triggers += [issue for issue in semantic_issues
+                          if issue.startswith("Unsupported") or "not lowered" in issue]
+
         # Generate diff
         diff_data = DiffGenerator().generate(code, generated_code)
         token_similarity = compute_token_similarity(code, generated_code)
         ast_similarity = compute_ast_similarity(code, generated_code)
         structure_similarity = compute_structure_similarity(code, generated_code)
-        metrics = {
-            "diff_count": diff_data["total_changes"],
-            "semantic_issues": len(semantic_issues),
+
+        # One feature vector, used both here and by ml/build_dataset.py, so
+        # what the models are trained on is exactly what they are served.
+        features = {
             "compile_success": compile_flag,
-            "risk_score": 1 if not compile_success else 0,
+            "risk_score": len(risk_triggers),
+            "semantic_issues": len(semantic_issues),
+            "diff_count": diff_data["total_changes"],
             "token_similarity": token_similarity,
             "ast_similarity": ast_similarity,
-            "structure_similarity": structure_similarity
+            "structure_similarity": structure_similarity,
+            **construct_profile(ir),
+            "n_helpers": helper_count(generated_code),
+            **direction(source, target),
         }
 
-        # Confidence scoring
-        confidence_engine = ConfidenceEngine()
-        accuracy_engine = AccuracyEngine()
-
-        confidence = confidence_engine.predict(metrics)
-        accuracy = round(accuracy_engine.predict(metrics,source,target),2)
+        confidence = ConfidenceEngine().predict(features)
+        accuracy = AccuracyEngine().predict(features, source, target)
 
         return {
         "source": source,
@@ -81,6 +116,10 @@ class CrossLanguageEngine:
         "semantic_issues": semantic_issues,
         "confidence": confidence,
         "accuracy": accuracy,
+        "risk_level": risk_level(compile_success, risk_triggers),
+        "risk_score": len(risk_triggers),
+        "risk_triggers": risk_triggers,
+        "features": features,
         "token_similarity": token_similarity,
         "ast_similarity": ast_similarity,
         "structure_similarity": structure_similarity,

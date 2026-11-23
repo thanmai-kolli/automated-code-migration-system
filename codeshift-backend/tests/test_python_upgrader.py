@@ -1,8 +1,6 @@
+from version_upgrade_system.core.toolchain import compile_check
 from version_upgrade_system.languages.python.enterprise_engine.python_upgrader import (
     PythonEnterpriseUpgrader,
-)
-from version_upgrade_system.languages.python.enterprise_engine.validator import (
-    PythonValidator,
 )
 from version_upgrade_system.languages.python.enterprise_engine.version_detector import (
     PythonVersionDetector,
@@ -36,19 +34,24 @@ class TestPythonVersionDetector:
 class TestPythonValidator:
 
     def test_valid_code_passes(self):
-        result = PythonValidator().validate("x = 1\n")
+        result = compile_check("python", "x = 1\n")
         assert result["compile_success"] is True
         assert result["validation_status"] == "PASS"
         assert result["compile_errors"] == []
 
     def test_syntax_error_fails_with_line_number(self):
-        result = PythonValidator().validate("def f(:\n    pass\n")
+        result = compile_check("python", "def f(:\n    pass\n")
         assert result["compile_success"] is False
         assert result["validation_status"] == "FAIL"
         assert result["compile_errors"]
 
     def test_bad_indentation_is_rejected(self):
-        result = PythonValidator().validate("def f():\n    x = 1\n  y = 2\n")
+        result = compile_check("python", "def f():\n    x = 1\n  y = 2\n")
+        assert result["compile_success"] is False
+
+    def test_compiler_level_errors_are_caught(self):
+        # ast.parse accepts this; the bytecode compiler does not.
+        result = compile_check("python", "break\n")
         assert result["compile_success"] is False
 
 
@@ -81,7 +84,7 @@ class TestPythonUpgrader:
     def test_already_modern_code_is_left_alone(self):
         source = "def f():\n    print('hi')\n"
         result = PythonEnterpriseUpgrader().upgrade(source)
-        assert result["code"] == source.rstrip("\n")
+        assert result["code"] == source
         assert result["detected_version"] == "Python 3.x"
 
     def test_report_contains_expected_keys(self):
@@ -149,8 +152,9 @@ class TestPython2Rules:
 
     def test_applied_rules_are_reported(self):
         result = self._upgrade("for i in xrange(3):\n    print i\n")
-        assert len(result["risk_triggers"]) >= 2
-        assert result["risk_score"] >= 2
+        assert "xrange() -> range()" in result["applied_rules"]
+        assert "print statement -> print()" in result["applied_rules"]
+        assert result["rejected_rules"] == []
 
     def test_modern_code_triggers_nothing(self):
         result = self._upgrade("for i in range(3):\n    print(i)\n")
@@ -179,3 +183,36 @@ class TestPython2Rules:
         source = "d = {'a': 1}\nprint(d)\n"
         result = self._upgrade(source)
         assert result["compile_success"]
+
+
+class TestPythonSemantics:
+    """Rules that 2to3 does not have, and text the rules must never touch."""
+
+    def _upgrade(self, source):
+        return PythonEnterpriseUpgrader().upgrade(source)
+
+    def test_integer_division_keeps_python2_floor_semantics(self):
+        source = "a = int(raw_input())\nb = int(raw_input())\nprint a / b\n"
+        assert "a // b" in self._upgrade(source)["code"]
+
+    def test_float_division_is_left_alone(self):
+        result = self._upgrade("x = 7\ny = 2.0\nprint x / y\n")
+        assert "x / y" in result["code"]
+
+    def test_unknown_division_is_reported_as_a_risk(self):
+        result = self._upgrade("def f(a, b):\n    print a / b\n")
+        assert any("true division" in t for t in result["risk_triggers"])
+
+    def test_stored_dict_views_stay_lists(self):
+        source = "d = {'b': 1, 'a': 2}\nkeys = d.keys()\nkeys.sort()\n"
+        assert "keys = list(d.keys())" in self._upgrade(source)["code"]
+
+    def test_strings_and_comments_are_not_rewritten(self):
+        source = 'msg = "print x <> y xrange("  # raw_input()\nprint msg\n'
+        code = self._upgrade(source)["code"]
+        assert '"print x <> y xrange("' in code
+        assert "# raw_input()" in code
+
+    def test_has_key_keeps_comparison_precedence(self):
+        code = self._upgrade("d = {}\nx = d.has_key('a') == False\n")["code"]
+        assert "('a' in d) == False" in code

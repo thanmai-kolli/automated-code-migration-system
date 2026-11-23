@@ -5,15 +5,28 @@ information at the syntax level. This pass walks the IR twice and records a
 concrete type for every parameter, field, local and function return so that
 statically typed generators do not have to fall back to `Object`.
 
-Types are expressed in a neutral vocabulary — int, double, boolean, String,
-List<T>, Map<K,V>, Set<T>, <ClassName>, Object — which TypeMapper then renders
-per target language.
+Types are expressed in a neutral vocabulary — int, long, double, char,
+boolean, String, List<T>, Map<K,V>, Set<T>, <ClassName>, Object — which the
+generators then render per target language.
+
+Every expression it visits also gets an ``inferred_type`` attribute, and the
+final pass rewrites the arithmetic operators whose meaning depends on the
+source language: ``/`` on two ints truncates in C and Java but not in Python,
+and ``%`` takes the sign of the dividend in C and Java but of the divisor in
+Python. After annotation the IR spells those out as TruncDiv/TruncMod (C
+semantics) or FloorDiv/FloorMod (Python semantics), so generators never have
+to guess.
 """
 
 from cross_language_system.core.ir_nodes import *
 
-NUMERIC = ("int", "double")
+NUMERIC = ("int", "long", "double")
+INTEGRAL = ("int", "long", "char", "boolean")
 UNKNOWN = "Object"
+C_SEMANTICS = ("java", "c", "c++", "cpp")
+
+# Library calls every parser normalises to the same name.
+MATH_RETURNS = {"sqrt": "double", "pow": "double", "floor": "double", "ceil": "double"}
 
 # Operators that force both operands to be numeric.
 ARITHMETIC_OPS = {"Sub", "Mult", "Div", "FloorDiv", "Mod", "Pow"}
@@ -42,8 +55,8 @@ def widen(a, b):
     if b in (None, UNKNOWN):
         return a
     if a in NUMERIC and b in NUMERIC:
-        return "double"
-    if {a, b} == {"int", "boolean"}:
+        return "double" if "double" in (a, b) else "long"
+    if {a, b} in ({"int", "boolean"}, {"int", "char"}):
         return "int"
 
     # Generic containers unify element-wise rather than collapsing to Object.
@@ -80,12 +93,16 @@ class Scope:
 class TypeAnnotator:
     """Annotates a Program in place and exposes the resolved type tables."""
 
-    def __init__(self):
+    def __init__(self, source="python"):
         self.functions = {}      # name -> return type
         self.classes = {}        # class name -> {field: type}
         self.function_defs = {}  # name -> Function node
-        self.call_sites = {}     # name -> list of argument-type tuples
+        self.method_defs = {}    # (class, method) -> Function node; constructors as (class, None)
+        self.method_returns = {}  # (class, method) -> return type
+        self.call_sites = {}     # name or (class, method) -> list of argument-type tuples
         self.current_class = None
+        # Whether / and % follow C (truncating) or Python (flooring) rules.
+        self.c_semantics = (source or "python").lower() in C_SEMANTICS
 
     # ------------------------------------------------------------
     # ENTRY POINT
@@ -93,13 +110,31 @@ class TypeAnnotator:
 
     def annotate(self, program):
 
+        # In C and Java every parameter and return type is written down, and
+        # the program's meaning depends on it (int division, truncation on
+        # assignment), so declarations are authoritative there and inference
+        # only fills what is missing.
+        self.declared_params = {}
+        self.declared_returns = {}
+
         for node in program.body:
             if isinstance(node, Class):
                 self.classes.setdefault(
                     node.name, {f.name: f.field_type for f in node.fields}
                 )
+                for method in node.methods:
+                    key = (node.name, None if method.is_constructor else method.name)
+                    self.method_defs[key] = method
             elif isinstance(node, Function):
                 self.function_defs[node.name] = node
+
+        if self.c_semantics:
+            for func in self._functions_of(program):
+                self.declared_params[id(func)] = {
+                    p: t for p, t in func.param_types.items() if self._is_declared(t)
+                }
+                if self._is_declared(func.return_type) or func.return_type == "void":
+                    self.declared_returns[id(func)] = self._normalize(func.return_type)
 
         # Three passes: discover signatures, feed call-site argument types back
         # into the definitions, then resolve everything with full information.
@@ -114,19 +149,122 @@ class TypeAnnotator:
 
             self._apply_call_sites()
 
+        self._lower_arithmetic(program)
         return program
+
+    # ------------------------------------------------------------
+    # SOURCE-LANGUAGE ARITHMETIC
+    # ------------------------------------------------------------
+
+    def _lower_arithmetic(self, program):
+        """Name the division and remainder semantics the source actually has."""
+
+        for node in self._walk_all(program):
+            if isinstance(node, BinaryOp):
+                node.operator = self._precise_operator(
+                    node.operator, self._type_of(node.left), self._type_of(node.right)
+                )
+            elif isinstance(node, AugAssign):
+                node.operator = self._precise_operator(
+                    node.operator, self._type_of(node.target), self._type_of(node.value)
+                )
+
+    def _precise_operator(self, operator, left, right):
+
+        if self.c_semantics:
+            integral = self._integral(left) and self._integral(right)
+            if operator == "Div" and integral:
+                return "TruncDiv"
+            if operator == "Mod" and integral:
+                return "TruncMod"
+            return operator
+
+        # Python: % on a string is formatting, not arithmetic.
+        if operator == "Mod" and left != "String":
+            return "FloorMod"
+        return operator
+
+    @staticmethod
+    def _integral(type_name):
+        # An unresolved operand in a C-family source is almost always an int,
+        # and every declared floating type resolves to double.
+        return type_name in INTEGRAL or type_name in (None, UNKNOWN)
+
+    @staticmethod
+    def _type_of(expr):
+        return getattr(expr, "inferred_type", None)
+
+    def _walk_all(self, node):
+        """Every IR object reachable from node, depth first."""
+
+        stack = [node]
+        seen = set()
+        while stack:
+            current = stack.pop()
+            if current is None or isinstance(current, (str, int, float, bool)):
+                continue
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            yield current
+            for value in vars(current).values() if hasattr(current, "__dict__") else ():
+                if isinstance(value, list):
+                    stack.extend(value)
+                elif isinstance(value, dict):
+                    stack.extend(value.values())
+                elif hasattr(value, "__dict__"):
+                    stack.append(value)
 
     def _apply_call_sites(self):
 
         for name, argument_lists in self.call_sites.items():
 
-            func = self.function_defs.get(name)
+            func = self.method_defs.get(name) if isinstance(name, tuple) else self.function_defs.get(name)
             if not func:
                 continue
 
+            declared = self.declared_params.get(id(func), {})
             for arg_types in argument_lists:
                 for param, arg_type in zip(func.params, arg_types):
+                    if param in declared:
+                        continue
                     func.param_types[param] = widen(func.param_types.get(param), arg_type)
+
+    @staticmethod
+    def _is_declared(type_name):
+        return type_name not in (None, "", "auto", "void", UNKNOWN, "object")
+
+    @staticmethod
+    def _functions_of(program):
+        for node in program.body:
+            if isinstance(node, Function):
+                yield node
+            elif isinstance(node, Class):
+                yield from node.methods
+
+    def _converted(self, value, target_type):
+        """value as C/Java would store it in a target_type slot.
+
+        Both languages convert between int and double implicitly on
+        assignment and return (C in both directions, Java when widening);
+        Python does not, so the conversion has to become explicit.
+        """
+
+        if not self.c_semantics or value is None:
+            return value
+        value_type = getattr(value, "inferred_type", None)
+        if target_type in ("int", "long") and value_type == "double":
+            converted = TypeCast("int", value)
+            converted.inferred_type = target_type
+            return converted
+        if target_type == "double" and value_type in ("int", "long"):
+            if isinstance(value, Constant) and not isinstance(value.value, bool):
+                converted = Constant(float(value.value))
+            else:
+                converted = TypeCast("float", value)
+            converted.inferred_type = "double"
+            return converted
+        return value
 
     def _record_call(self, name, arg_types):
         self.call_sites.setdefault(name, []).append(arg_types)
@@ -188,6 +326,8 @@ class TypeAnnotator:
             self._visit_statement(stmt, scope)
 
         for param in func.params:
+            if param in self.declared_params.get(id(func), {}):
+                continue
             from_usage = self._infer_param_from_usage(param, func.body, scope)
             scope.set(param, widen(scope.get(param), from_usage))
 
@@ -201,9 +341,19 @@ class TypeAnnotator:
 
         if func.is_constructor:
             func.return_type = "void"
+        elif id(func) in self.declared_returns:
+            func.return_type = self.declared_returns[id(func)]
+            self.functions[func.name] = func.return_type
+            for stmt in self._walk(func.body):
+                if isinstance(stmt, Return) and stmt.value is not None:
+                    self.infer(stmt.value, scope)
+                    stmt.value = self._converted(stmt.value, func.return_type)
         else:
             func.return_type = self._infer_return_type(func.body, scope)
             self.functions[func.name] = func.return_type
+
+        if func.owner and not func.is_constructor:
+            self.method_returns[(func.owner, func.name)] = func.return_type
 
         return func
 
@@ -313,11 +463,19 @@ class TypeAnnotator:
 
         if isinstance(stmt, Variable):
             inferred = self.infer(stmt.value, scope)
-            if stmt.var_type and stmt.var_type not in ("auto", UNKNOWN):
-                inferred = widen(self._normalize(stmt.var_type), inferred)
+            declared = stmt.var_type and stmt.var_type not in ("auto", UNKNOWN)
             existing = scope.get(stmt.name)
-            scope.set(stmt.name, widen(existing, inferred) if existing else inferred)
+            if self.c_semantics and declared:
+                # int x = 2.5 is still an int in C.
+                scope.vars[stmt.name] = self._normalize(stmt.var_type)
+            elif self.c_semantics and existing not in (None, UNKNOWN):
+                pass  # plain assignment to a variable declared earlier
+            else:
+                if declared:
+                    inferred = widen(self._normalize(stmt.var_type), inferred)
+                scope.set(stmt.name, widen(existing, inferred) if existing else inferred)
             stmt.var_type = scope.get(stmt.name) or UNKNOWN
+            stmt.value = self._converted(stmt.value, stmt.var_type)
 
         elif isinstance(stmt, Assignment):
             # cin >> x carries no type; take it from what is being written to.
@@ -325,9 +483,13 @@ class TypeAnnotator:
                 stmt.value.value_type = self.infer(stmt.target, scope)
 
             value_type = self.infer(stmt.value, scope)
+            target_type = self.infer(stmt.target, scope)
 
             if isinstance(stmt.target, Identifier):
-                scope.set(stmt.target.name, widen(scope.get(stmt.target.name), value_type))
+                if self.c_semantics and target_type not in (None, UNKNOWN):
+                    stmt.value = self._converted(stmt.value, target_type)
+                else:
+                    scope.set(stmt.target.name, widen(scope.get(stmt.target.name), value_type))
 
             if isinstance(stmt.target, AttributeAccess) and isinstance(stmt.target.obj, SelfRef):
                 if self.current_class:
@@ -337,22 +499,43 @@ class TypeAnnotator:
                     )
 
         elif isinstance(stmt, AugAssign):
+            self.infer(stmt.value, scope)
+            # x op= v has the type of x op v (Python's x /= 2 makes x a float).
+            value_type = self._infer(BinaryOp(stmt.target, stmt.operator, stmt.value), scope)
             if isinstance(stmt.target, Identifier):
-                scope.set(stmt.target.name, widen(scope.get(stmt.target.name), self.infer(stmt.value, scope)))
+                current = scope.get(stmt.target.name)
+                # x /= 2 on an int stays an int in C and Java.
+                if not (self.c_semantics and current in INTEGRAL):
+                    scope.set(stmt.target.name, widen(current, value_type))
+            self.infer(stmt.target, scope)
+
+        elif isinstance(stmt, PrintStatement):
+            for arg in stmt.args:
+                self.infer(arg, scope)
+
+        elif isinstance(stmt, Block):
+            for s in stmt.body:
+                self._visit_statement(s, scope)
+
+        elif isinstance(stmt, Return):
+            self.infer(stmt.value, scope)
 
         elif isinstance(stmt, (IfStatement,)):
+            self.infer(stmt.condition, scope)
             for s in list(stmt.body) + list(stmt.else_body or []):
                 self._visit_statement(s, scope)
 
         elif isinstance(stmt, ForLoop):
+            iterable_type = self.infer(stmt.iterable, scope)
             if isinstance(stmt.iterable, RangeCall):
                 scope.set(stmt.iterator, "int")
             else:
-                scope.set(stmt.iterator, self._element_type(self.infer(stmt.iterable, scope)))
+                scope.set(stmt.iterator, self._element_type(iterable_type))
             for s in stmt.body:
                 self._visit_statement(s, scope)
 
         elif isinstance(stmt, WhileLoop):
+            self.infer(stmt.condition, scope)
             for s in stmt.body:
                 self._visit_statement(s, scope)
 
@@ -361,19 +544,23 @@ class TypeAnnotator:
                 self._visit_statement(s, scope)
 
         elif isinstance(stmt, ListAppend):
+            self.infer(stmt.list_obj, scope)
             if isinstance(stmt.list_obj, Identifier):
                 element = self._boxed(self.infer(stmt.value, scope))
                 current = scope.get(stmt.list_obj.name)
                 if not current or current in (UNKNOWN, "List<Object>"):
                     scope.set(stmt.list_obj.name, f"List<{element}>")
+            else:
+                self.infer(stmt.value, scope)
 
         elif isinstance(stmt, DictPut):
+            key = self._boxed(self.infer(stmt.key, scope))
+            value = self._boxed(self.infer(stmt.value, scope))
             if isinstance(stmt.dictionary, Identifier):
-                key = self._boxed(self.infer(stmt.key, scope))
-                value = self._boxed(self.infer(stmt.value, scope))
                 current = scope.get(stmt.dictionary.name)
                 if not current or current in (UNKNOWN, "Map<Object, Object>"):
                     scope.set(stmt.dictionary.name, f"Map<{key}, {value}>")
+            self.infer(stmt.dictionary, scope)
 
         elif isinstance(stmt, Function):
             self._annotate_function(stmt, Scope(scope))
@@ -390,11 +577,21 @@ class TypeAnnotator:
     # ------------------------------------------------------------
 
     def infer(self, expr, scope):
+        """Type of expr; also recorded on the node for the generators."""
+
+        result = self._infer(expr, scope)
+        if expr is not None and hasattr(expr, "__dict__"):
+            expr.inferred_type = result
+        return result
+
+    def _infer(self, expr, scope):
 
         if expr is None:
             return UNKNOWN
 
         if isinstance(expr, Constant):
+            if getattr(expr, "is_char", False):
+                return "char"
             return self._constant_type(expr.value)
 
         if isinstance(expr, Identifier):
@@ -417,29 +614,52 @@ class TypeAnnotator:
         if isinstance(expr, BinaryOp):
             left = self.infer(expr.left, scope)
             right = self.infer(expr.right, scope)
-            if "String" in (left, right):
+            operator = expr.operator
+            if operator in ("Add", "Mult") and "String" in (left, right):
                 return "String"
-            if expr.operator == "Div":
+            if operator in ("Mod", "FloorMod") and left == "String":
+                return "String"
+            integral = "long" if "long" in (left, right) else "int"
+            if operator in ("TruncDiv", "TruncMod"):
+                return integral
+            if operator == "Div":
+                if self.c_semantics and self._integral(left) and self._integral(right):
+                    return integral
                 return "double"
-            if expr.operator == "Pow":
+            if operator == "Pow":
                 # int ** int stays integral in Python.
-                return "double" if "double" in (left, right) else "int"
+                return "double" if "double" in (left, right) else integral
+            if operator in ("BitAnd", "BitOr", "BitXor", "LShift", "RShift"):
+                return integral
             if "double" in (left, right):
                 return "double"
-            if left == "int" or right == "int":
+            if "long" in (left, right):
+                return "long"
+            if "int" in (left, right) or "char" in (left, right):
                 return "int"
             return widen(left, right)
 
         if isinstance(expr, BooleanOp):
+            self.infer(expr.left, scope)
+            self.infer(expr.right, scope)
             return "boolean"
 
         if isinstance(expr, TernaryOp):
+            self.infer(expr.condition, scope)
             return widen(self.infer(expr.if_true, scope), self.infer(expr.if_false, scope))
 
         if isinstance(expr, StringInterpolation):
+            for part in expr.parts:
+                self.infer(part, scope)
+            return "String"
+
+        if isinstance(expr, FormatString):
+            for arg in expr.args:
+                self.infer(arg, scope)
             return "String"
 
         if isinstance(expr, TypeCast):
+            self.infer(expr.value, scope)
             return self._normalize(expr.target_type)
 
         if isinstance(expr, Input):
@@ -473,6 +693,9 @@ class TypeAnnotator:
             return f"Map<{self._boxed(key)}, {self._boxed(value)}>"
 
         if isinstance(expr, ObjectCreation):
+            arg_types = [self.infer(a, scope) for a in (expr.arguments or [])]
+            if expr.class_name in self.classes:
+                self._record_call((expr.class_name, None), arg_types)
             # A collection constructor describes a container, not a user class.
             return {
                 "ArrayList": "List<Object>",
@@ -485,22 +708,51 @@ class TypeAnnotator:
             }.get(expr.class_name, expr.class_name)
 
         if isinstance(expr, FunctionCall):
-            self._record_call(expr.name, [self.infer(a, scope) for a in expr.args])
-            return self.functions.get(expr.name, UNKNOWN)
+            arg_types = [self.infer(a, scope) for a in expr.args]
+            self._record_call(expr.name, arg_types)
+            if expr.name in self.functions:
+                return self.functions[expr.name]
+            if expr.name in MATH_RETURNS:
+                return MATH_RETURNS[expr.name]
+            if expr.name in ("isupper", "islower", "isdigit", "isalpha", "isspace", "isalnum"):
+                return "boolean"
+            if expr.name in ("toupper", "tolower"):
+                return "char"
+            if expr.name in ("max", "min", "sum") and len(arg_types) == 1:
+                # max(values) over a container yields an element.
+                return self._element_type(arg_types[0])
+            if expr.name in ("abs", "max", "min") and arg_types:
+                result = None
+                for arg_type in arg_types:
+                    result = widen(result, arg_type)
+                return result
+            return UNKNOWN
 
         if isinstance(expr, MethodCall):
+            obj_type = self.infer(expr.obj, scope)
+            arg_types = [self.infer(arg, scope) for arg in expr.args]
+            if obj_type in self.classes:
+                # A call on a user object: its arguments type the method's
+                # parameters, and its result is the method's return type.
+                self._record_call((obj_type, expr.method), arg_types)
+                return self.method_returns.get((obj_type, expr.method), UNKNOWN)
             if expr.method == "size":
                 return "int"
             if expr.method == "split":
                 return "List<String>"
             if expr.method in ("keys", "values"):
                 return "List<Object>"
+            if expr.method in ("upper", "lower", "strip", "toUpperCase", "toLowerCase", "trim"):
+                return "String" if obj_type == "String" else UNKNOWN
             return UNKNOWN
 
         if isinstance(expr, IndexAccess):
+            self.infer(expr.index, scope)
             return self._element_type(self.infer(expr.obj, scope))
 
         if isinstance(expr, RangeCall):
+            for arg in expr.args:
+                self.infer(arg, scope)
             return "List<Integer>"
 
         return UNKNOWN
@@ -525,8 +777,14 @@ class TypeAnnotator:
     def _normalize(name):
         return {
             "int": "int",
+            "integer": "int",
+            "short": "int",
+            "byte": "int",
+            "long": "long",
             "float": "double",
             "double": "double",
+            "char": "char",
+            "character": "char",
             "bool": "boolean",
             "boolean": "boolean",
             "str": "String",
@@ -542,7 +800,9 @@ class TypeAnnotator:
     def _boxed(type_name):
         return {
             "int": "Integer",
+            "long": "Long",
             "double": "Double",
+            "char": "Character",
             "boolean": "Boolean",
             None: "Object",
             UNKNOWN: "Object",
@@ -552,7 +812,8 @@ class TypeAnnotator:
     def _element_type(container):
         if isinstance(container, str) and container.startswith(("List<", "Set<")):
             inner = container[container.index("<") + 1:-1]
-            return {"Integer": "int", "Double": "double", "Boolean": "boolean"}.get(inner, inner)
+            return {"Integer": "int", "Long": "long", "Double": "double",
+                    "Character": "char", "Boolean": "boolean"}.get(inner, inner)
         if isinstance(container, str) and container.startswith("Map<"):
             inner = container[container.index("<") + 1:-1]
             return inner.split(",")[-1].strip()
@@ -566,7 +827,7 @@ class TypeAnnotator:
             if isinstance(stmt, IfStatement):
                 yield from self._walk(stmt.body)
                 yield from self._walk(stmt.else_body or [])
-            elif isinstance(stmt, (ForLoop, WhileLoop)):
+            elif isinstance(stmt, (ForLoop, WhileLoop, Block)):
                 yield from self._walk(stmt.body)
             elif isinstance(stmt, TryCatch):
                 yield from self._walk(stmt.try_body)

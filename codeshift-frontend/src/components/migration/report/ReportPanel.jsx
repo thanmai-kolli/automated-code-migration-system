@@ -10,18 +10,20 @@ export default function ReportPanel({ report, mode }) {
       </div>
     );
   }
-  const rawConfidence = report.confidence ?? 0;
+  const rawConfidence = report.confidence;
+  const confidencePercent =
+    rawConfidence === null
+      ? null
+      : rawConfidence <= 1
+      ? Math.round(rawConfidence * 100)
+      : Math.round(rawConfidence);
 
-const confidencePercent =
-  rawConfidence <= 1
-    ? Math.round(rawConfidence * 100)   // decimal case (0.78 → 78)
-    : Math.round(rawConfidence);        // already percentage (78 → 78)
   const riskClass =
     report.riskLevel === "HIGH"
       ? "risk-high"
-      : report.riskLevel === "MEDIUM"
-      ? "risk-medium"
-      : "risk-low";
+      : report.riskLevel === "LOW"
+      ? "risk-low"
+      : "risk-medium";
 
   const compileClass =
     report.compileSuccess === null
@@ -30,7 +32,12 @@ const confidencePercent =
       ? "compile-success"
       : "compile-failed";
 
-  const accuracy = report?.accuracy ?? 0;
+  // A measured test pass rate always beats the model's prediction.
+  const tests = report.testResults;
+  const measured = tests && tests.enabled !== false && tests.total > 0;
+  const accuracy = measured
+    ? Math.round((100 * tests.passed) / tests.total)
+    : report.accuracy;
 
   return (
     <div className={`report-section ${mode}`}>
@@ -41,32 +48,44 @@ const confidencePercent =
 
         {/* Accuracy */}
         <div className="report-box">
-          <h4>Transformation Accuracy</h4>
-          <div className="accuracy-value">{accuracy}%</div>
-          <div className="accuracy-bar">
-            <div
-              className="accuracy-fill"
-              style={{ width: `${accuracy}%` }}
-            />
-          </div>
+          <h4>{measured ? "Measured Accuracy" : "Predicted Accuracy"}</h4>
+          {accuracy === null ? (
+            <div className="accuracy-value">—</div>
+          ) : (
+            <>
+              <div className="accuracy-value">{accuracy}%</div>
+              <div className="accuracy-bar">
+                <div
+                  className="accuracy-fill"
+                  style={{ width: `${accuracy}%` }}
+                />
+              </div>
+            </>
+          )}
           <p className="report-description">
-            Measures structural similarity after migration based on diff changes.
+            {measured
+              ? "Share of your test cases on which the migrated program printed exactly what the original printed."
+              : accuracy === null
+              ? "Add test cases to measure behaviour."
+              : "Model estimate of the share of inputs handled like the original. Add test cases for a measured value."}
           </p>
         </div>
 
         {/* Confidence */}
-        <div className="report-box">
-          <h4>Model Confidence</h4>
-          <div
-            className="confidence-circle"
-            style={{ "--confidence": confidencePercent }}
+        {confidencePercent !== null && (
+          <div className="report-box">
+            <h4>Model Confidence</h4>
+            <div
+              className="confidence-circle"
+              style={{ "--confidence": confidencePercent }}
             >
-            <span>{confidencePercent}%</span>
+              <span>{confidencePercent}%</span>
+            </div>
+            <p className="report-description">
+              Estimated probability that the migration preserves behaviour.
+            </p>
           </div>
-          <p className="report-description">
-            AI-driven reliability score for the generated code.
-          </p>
-        </div>
+        )}
 
         {/* Risk */}
         <div className="report-box">
@@ -74,11 +93,13 @@ const confidencePercent =
           <span className={`risk-badge ${riskClass}`}>
             {report.riskLevel}
           </span>
-          <div className="risk-score">
-            Risk Score: {report.riskScore}
-          </div>
+          {report.riskScore !== null && (
+            <div className="risk-score">
+              Risk Score: {report.riskScore}
+            </div>
+          )}
           <p className="report-description">
-            Indicates potential breaking changes or unsafe transformations.
+            Based on compilation, unsupported constructs, risky rewrites and failed test cases.
           </p>
         </div>
 
@@ -138,32 +159,6 @@ const confidencePercent =
           </div>
         )}
         {/* ===== Upgrade Summary (Only for Version Mode) ===== */}
-        {/* {mode === "upgrade" && (
-          <div className="report-box upgrade-box">
-            <h4>Upgrade Summary</h4>
-
-            <div className="upgrade-stat">
-              <strong>{report.totalDiffChanges}</strong>
-              <span>Code Changes Applied</span>
-            </div>
-
-            <div className="upgrade-stat">
-              <strong>{report.riskScore}</strong>
-              <span>Modernization Impact Score</span>
-            </div>
-
-            {report.detectedVersion && (
-              <div className="upgrade-version">
-                From: {report.detectedVersion}
-              </div>
-            )}
-
-            <p className="report-description">
-              This upgrade modernizes deprecated constructs and improves
-              compatibility with newer standards.
-            </p>
-          </div>
-        )} */}
         {mode === "upgrade" && (
           <div className="report-box upgrade-box-premium">
             <h4>Upgrade Intelligence</h4>
@@ -172,16 +167,16 @@ const confidencePercent =
 
               <div className="upgrade-metric">
                 <div className="upgrade-number">
-                  {report.totalDiffChanges}
+                  {report.appliedRules.length}
                 </div>
-                <span>Code Changes Applied</span>
+                <span>Rules Applied</span>
               </div>
 
               <div className="upgrade-metric">
                 <div className="upgrade-number impact">
-                  {report.riskScore}
+                  {report.rejectedRules.length}
                 </div>
-                <span>Modernization Impact</span>
+                <span>Rules Rejected by Validation</span>
               </div>
 
             </div>
@@ -193,8 +188,9 @@ const confidencePercent =
             )}
 
             <p className="report-description">
-              Deprecated constructs were replaced and compatibility
-              with modern standards has been improved.
+              {report.appliedRules.length === 0
+                ? "No legacy construct could be rewritten safely; the code is unchanged."
+                : "Each rule was kept only if the program still compiled (and passed your test cases, if given)."}
             </p>
           </div>
         )}

@@ -1,6 +1,59 @@
+from cross_language_system.core import precedence as prec
+from cross_language_system.core import printf_format
+from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
 from cross_language_system.core.symbol_table import SymbolTable
 from cross_language_system.core.type_mapper import TypeMapper
+
+LANG = "java"
+
+# Names a source may use freely that javac reserves.
+RESERVED = {
+    "_", "abstract", "assert", "boolean", "byte", "case", "catch", "char", "class",
+    "const", "default", "do", "double", "enum", "extends", "final", "finally", "float",
+    "goto", "implements", "import", "instanceof", "int", "interface", "long", "native",
+    "new", "package", "private", "protected", "public", "short", "static", "strictfp",
+    "super", "switch", "synchronized", "this", "throw", "throws", "transient", "void",
+    "volatile", "var", "record", "yield", "null", "true", "false", "sc",
+}
+
+
+def java_name(name):
+    return f"{name}_" if name in RESERVED else name
+
+OPERATORS = {
+    "Add": "+", "Sub": "-", "Mult": "*", "Div": "/", "TruncDiv": "/",
+    "TruncMod": "%", "Mod": "%",
+    "BitAnd": "&", "BitOr": "|", "BitXor": "^", "LShift": "<<", "RShift": ">>",
+}
+
+COMPARISONS = {
+    "And": "&&", "Or": "||", "Eq": "==", "NotEq": "!=",
+    "Lt": "<", "Gt": ">", "LtE": "<=", "GtE": ">=",
+    "Is": "==", "IsNot": "!=",
+}
+
+# cout prints a double the way printf's %g does; Java has no such conversion.
+FMT_G = (
+    "    static String fmtG(double x) {\n"
+    "        // C++ stream output: %g with 6 significant digits.\n"
+    "        if (Double.isNaN(x)) return \"nan\";\n"
+    "        if (Double.isInfinite(x)) return x > 0 ? \"inf\" : \"-inf\";\n"
+    "        if (x == 0) return (1 / x < 0) ? \"-0\" : \"0\";\n"
+    "        String e = String.format(Locale.ROOT, \"%.5e\", x);\n"
+    "        int exp = Integer.parseInt(e.substring(e.indexOf('e') + 1));\n"
+    "        String text;\n"
+    "        if (exp < -4 || exp >= 6) {\n"
+    "            String mantissa = e.substring(0, e.indexOf('e'));\n"
+    "            if (mantissa.contains(\".\")) mantissa = mantissa.replaceAll(\"0+$\", \"\").replaceAll(\"\\\\.$\", \"\");\n"
+    "            text = mantissa + \"e\" + (exp < 0 ? \"-\" : \"+\") + (Math.abs(exp) < 10 ? \"0\" : \"\") + Math.abs(exp);\n"
+    "        } else {\n"
+    "            text = String.format(Locale.ROOT, \"%.\" + (5 - exp) + \"f\", x);\n"
+    "            if (text.contains(\".\")) text = text.replaceAll(\"0+$\", \"\").replaceAll(\"\\\\.$\", \"\");\n"
+    "        }\n"
+    "        return text;\n"
+    "    }\n\n"
+)
 
 
 class JavaGenerator:
@@ -23,11 +76,12 @@ class JavaGenerator:
         self.target_lang = target_lang.lower()
         self.mapper = TypeMapper()
         self.symbol_table = SymbolTable()
-        
+
     def _to_wrapper(self, primitive):
 
         wrapper_map = {
             "int": "Integer",
+            "long": "Long",
             "double": "Double",
             "float": "Double",
             "boolean": "Boolean",
@@ -44,7 +98,11 @@ class JavaGenerator:
             .replace('"', '\\"')
             .replace("\n", "\\n")
             .replace("\t", "\\t")
+            .replace("\r", "\\r")
         )
+
+    def _literal(self, text):
+        return f'"{self._escape(text)}"'
 
     # -------------------------------------------------
     # ENTRY POINT
@@ -53,57 +111,60 @@ class JavaGenerator:
     def generate(self, program):
 
         uses_input = self._program_uses_input(program)
-        code = "import java.util.*;\n\n"
-        code += "public class Converted {\n"
+        self.helpers = set()
+        self.function_returns = {}
+        self.current_class = None
+        self.class_names = {n.name for n in program.body if isinstance(n, Class)}
 
-        if uses_input:
-            code += "    static Scanner sc = new Scanner(System.in);\n\n"
-
+        members = ""
         function_names = []
         main_statements = []
-        self.function_returns = {}
 
-        # ---------------------------------------------
-        # Separate functions and top-level statements
-        # ---------------------------------------------
         for node in program.body:
 
             if isinstance(node, Function):
-                code += self._generate_node(node)
+                members += self._generate_node(node)
                 function_names.append(node.name)
 
             elif isinstance(node, Class):
-                code += self._generate_node(node)
+                members += self._generate_node(node)
 
             else:
                 # Collect top-level statements to inject into main()
                 main_statements.append(node)
 
-        # ---------------------------------------------
-        # Generate main method
-        # ---------------------------------------------
-        code += "    public static void main(String[] args) {\n"
+        main = "    public static void main(String[] args) {\n"
 
         if not main_statements and function_names:
             # Only a zero-argument function can be invoked without inventing values.
-            first_function = None
-
             for node in program.body:
                 if isinstance(node, Function) and len(node.params) == 0:
-                    first_function = node.name
+                    main += f"        {node.name}();\n"
                     break
 
-            if first_function:
-                code += f"        {first_function}();\n"
-
-        # Inject top-level statements (like print, variable, loops, etc.)
+        self.symbol_table = SymbolTable()
         for stmt in main_statements:
-            code += self._generate_statement(stmt, indent=2)
+            main += self._generate_statement(stmt, indent=2)
 
-        code += "    }\n"
-        code += "}\n"
+        main += "    }\n"
+
+        code = "import java.util.*;\n\n"
+        code += "public class Converted {\n"
+        if uses_input:
+            code += "    static Scanner sc = new Scanner(System.in);\n\n"
+        if "fmtG" in self.helpers:
+            code += FMT_G
+        if "charAt" in self.helpers:
+            code += (
+                "    static char charAt(String text, int index) {\n"
+                "        // A C string reads as '\\0' past its last character.\n"
+                "        return index >= 0 && index < text.length() ? text.charAt(index) : '\\0';\n"
+                "    }\n\n"
+            )
+        code += members + main + "}\n"
 
         return code
+
     # -------------------------------------------------
     # NODE GENERATION
     # -------------------------------------------------
@@ -124,7 +185,7 @@ class JavaGenerator:
 
     def _generate_class(self, cls):
 
-        previous_class = getattr(self, "current_class", None)
+        previous_class = self.current_class
         self.current_class = cls
 
         extends = f" extends {cls.base}" if cls.base else ""
@@ -155,8 +216,8 @@ class JavaGenerator:
         params = []
         for p in func.params:
             param_type = self._java_type(func.param_types.get(p, "Object"))
-            params.append(f"{param_type} {p}")
-            self.symbol_table.register_variable(p, param_type)
+            params.append(f"{param_type} {java_name(p)}")
+            self.symbol_table.register_variable(java_name(p), param_type)
 
         if owner:
             for field in owner.fields:
@@ -169,7 +230,7 @@ class JavaGenerator:
         else:
             return_type = self._java_type(func.return_type)
             self.function_returns[func.name] = return_type
-            modifier = "public" if owner else "public static"
+            modifier = "public" if owner and not func.is_static else "public static"
             code = f"{tab}{modifier} {return_type} {func.name}({signature}) {{\n"
 
         for stmt in func.body:
@@ -216,8 +277,10 @@ class JavaGenerator:
 
         direct = {
             "int": "int",
+            "long": "long",
             "float": "double",
             "double": "double",
+            "char": "char",
             "bool": "boolean",
             "boolean": "boolean",
             "str": "String",
@@ -228,21 +291,40 @@ class JavaGenerator:
             return direct[type_name]
 
         if type_name.startswith(("List<", "Map<", "Set<")):
+            return self._fix_java_generics(type_name)
+
+        if type_name in getattr(self, "class_names", ()):
             return type_name
 
         mapped = self.mapper.map(type_name, self.source_lang, self.target_lang)
         return mapped or "Object"
 
+    @staticmethod
+    def _type(expr):
+        return getattr(expr, "inferred_type", None)
+
     # -------------------------------------------------
     # STATEMENTS
     # -------------------------------------------------
+
+    def _scoped(self, statements, indent):
+        """A nested block: names declared inside go out of scope after it."""
+
+        self.symbol_table.push()
+        try:
+            return "".join(self._generate_statement(s, indent) for s in statements)
+        finally:
+            self.symbol_table.pop()
 
     def _generate_statement(self, stmt, indent):
 
         tab = "    " * indent
 
-        if isinstance(stmt, Pass):
+        if stmt is None or isinstance(stmt, Pass):
             return ""
+
+        if isinstance(stmt, Block):
+            return f"{tab}{{\n{self._scoped(stmt.body, indent + 1)}{tab}}}\n"
 
         if isinstance(stmt, Break):
             return f"{tab}break;\n"
@@ -251,122 +333,31 @@ class JavaGenerator:
             return f"{tab}continue;\n"
 
         if isinstance(stmt, Assignment):
-            return f"{tab}{self._generate_expr(stmt.target)} = {self._generate_expr(stmt.value)};\n"
+            return f"{tab}{self._store(stmt.target, self._generate_expr(stmt.value))};\n"
 
         if isinstance(stmt, AugAssign):
-            op_map = {"Add": "+=", "Sub": "-=", "Mult": "*=", "Div": "/=", "Mod": "%="}
-            op = op_map.get(stmt.operator, "+=")
-            return f"{tab}{self._generate_expr(stmt.target)} {op} {self._generate_expr(stmt.value)};\n"
+            return f"{tab}{self._aug_assign(stmt)};\n"
 
         if isinstance(stmt, TryCatch):
             exception = self.EXCEPTIONS.get(stmt.exception_type, stmt.exception_type or "Exception")
             code = f"{tab}try {{\n"
-            for s in stmt.try_body:
-                code += self._generate_statement(s, indent + 1)
+            code += self._scoped(stmt.try_body, indent + 1)
             code += f"{tab}}} catch ({exception} {stmt.catch_var or 'e'}) {{\n"
-            for s in stmt.catch_body:
-                code += self._generate_statement(s, indent + 1)
+            code += self._scoped(stmt.catch_body, indent + 1)
             code += f"{tab}}}\n"
             return code
 
-        if isinstance(stmt, FunctionCall):
-            args = ", ".join(self._generate_expr(a) for a in stmt.args)
-            return f"{tab}{stmt.name}({args});\n"
-        if isinstance(stmt, MethodCall):
+        if isinstance(stmt, (FunctionCall, MethodCall, ObjectCreation)):
+            return f"{tab}{self._generate_expr(stmt)};\n"
+
+        if isinstance(stmt, Input):
+            if stmt.value_type == "eol":
+                return f"{tab}if (sc.hasNextLine()) sc.nextLine();\n"
+            # A read whose value is discarded still consumes input.
             return f"{tab}{self._generate_expr(stmt)};\n"
 
         if isinstance(stmt, Variable):
-
-            # -------- DICTIONARY HANDLING --------
-            if isinstance(stmt.value, DictLiteral):
-
-                # An empty literal carries no element to infer from.
-                key_type = self._infer_type(stmt.value.keys[0]) if stmt.value.keys else "Object"
-                val_type = self._infer_type(stmt.value.values[0]) if stmt.value.values else "Object"
-
-                # First map Python → Java
-                mapped_key = self.mapper.map(
-                    key_type,
-                    self.source_lang,
-                    self.target_lang
-                )
-
-                mapped_val = self.mapper.map(
-                    val_type,
-                    self.source_lang,
-                    self.target_lang
-                )
-
-                # Then convert primitives to wrapper
-                key_wrapper = self._to_wrapper(mapped_key)
-                val_wrapper = self._to_wrapper(mapped_val)
-
-                self.symbol_table.register_variable(
-                    stmt.name,
-                    f"Map<{key_wrapper}, {val_wrapper}>"
-                )
-
-                code = f"{tab}Map<{key_wrapper}, {val_wrapper}> {stmt.name} = new HashMap<>();\n"
-
-                for k, v in zip(stmt.value.keys, stmt.value.values):
-                    code += f"{tab}{stmt.name}.put({self._generate_expr(k)}, {self._generate_expr(v)});\n"
-
-                return code
-
-            # -------- int(input()) HANDLING --------
-            if isinstance(stmt.value, TypeCast):
-
-                if isinstance(stmt.value.value, Input):
-
-                    prompt_code = ""
-
-                    if stmt.value.value.prompt:
-                        prompt_text = self._generate_expr(stmt.value.value.prompt)
-                        prompt_code = f"{tab}System.out.print({prompt_text});\n"
-
-                    target = stmt.value.target_type
-
-                    if target == "int":
-                        self.symbol_table.register_variable(stmt.name, "int")
-                        return prompt_code + f"{tab}int {stmt.name} = Integer.parseInt(sc.nextLine());\n"
-
-                    if target == "float":
-                        self.symbol_table.register_variable(stmt.name, "double")
-                        return prompt_code + f"{tab}double {stmt.name} = Double.parseDouble(sc.nextLine());\n"
-
-            # -------- INPUT HANDLING --------
-            if isinstance(stmt.value, Input):
-
-                prompt_code = ""
-
-                if stmt.value.prompt:
-                    prompt_text = self._generate_expr(stmt.value.prompt)
-                    prompt_code = f"{tab}System.out.print({prompt_text});\n"
-
-                declared = {"int": "int", "double": "double"}.get(stmt.value.value_type, "String")
-                self.symbol_table.register_variable(stmt.name, declared)
-
-                return prompt_code + f"{tab}{declared} {stmt.name} = {self._generate_expr(stmt.value)};\n"
-
-            # The annotator already resolved this declaration's type.
-            java_type = self._fix_java_generics(self._java_type(stmt.var_type))
-
-            # Check if variable already declared
-            existing_type = self.symbol_table.lookup(stmt.name)
-
-            if stmt.value is None:
-                if existing_type:
-                    return ""
-                self.symbol_table.register_variable(stmt.name, java_type)
-                return f"{tab}{java_type} {stmt.name};\n"
-
-            if existing_type:
-                # Reassignment
-                return f"{tab}{stmt.name} = {self._generate_expr(stmt.value)};\n"
-            else:
-                # First declaration
-                self.symbol_table.register_variable(stmt.name, java_type)
-                return f"{tab}{java_type} {stmt.name} = {self._generate_expr(stmt.value)};\n"
+            return self._declaration(stmt, tab)
 
         if isinstance(stmt, Return):
             if stmt.value is None:
@@ -375,10 +366,8 @@ class JavaGenerator:
 
         if isinstance(stmt, IfStatement):
 
-            code = f"{tab}if ({self._generate_expr(stmt.condition)}) {{\n"
-
-            for s in stmt.body:
-                code += self._generate_statement(s, indent + 1)
+            code = f"{tab}if ({self._condition(stmt.condition)}) {{\n"
+            code += self._scoped(stmt.body, indent + 1)
 
             if stmt.else_body:
                 # A lone nested if is an elif in the source; keep it as else-if.
@@ -387,111 +376,422 @@ class JavaGenerator:
                     return code + f"{tab}}} else {nested}"
 
                 code += f"{tab}}} else {{\n"
-                for s in stmt.else_body:
-                    code += self._generate_statement(s, indent + 1)
+                code += self._scoped(stmt.else_body, indent + 1)
 
             code += f"{tab}}}\n"
             return code
 
         if isinstance(stmt, ForLoop):
+            return self._for_loop(stmt, indent)
 
+        if isinstance(stmt, DictPut):
+            return f"{tab}{self._store(IndexAccess(stmt.dictionary, stmt.key), self._generate_expr(stmt.value))};\n"
 
+        if isinstance(stmt, PrintStatement):
+            return f"{tab}{self._print(stmt)}\n"
+
+        if isinstance(stmt, WhileLoop):
+            code = f"{tab}while ({self._condition(stmt.condition)}) {{\n"
+            code += self._scoped(stmt.body, indent + 1)
+            return code + f"{tab}}}\n"
+
+        if isinstance(stmt, ListAppend):
+            return f"{tab}{self._receiver(stmt.list_obj)}.add({self._generate_expr(stmt.value)});\n"
+
+        raise UnsupportedConstruct(f"statement {type(stmt).__name__} cannot be written as Java")
+
+    def _declaration(self, stmt, tab):
+
+        # -------- DICTIONARY HANDLING --------
+        if isinstance(stmt.value, DictLiteral) and not self.symbol_table.lookup(stmt.name):
+
+            declared = self._java_type(stmt.var_type)
+            if not declared.startswith("Map<"):
+                key_type = self._to_wrapper(self._java_type(self._type(stmt.value.keys[0]) or "Object")) \
+                    if stmt.value.keys else "Object"
+                val_type = self._to_wrapper(self._java_type(self._type(stmt.value.values[0]) or "Object")) \
+                    if stmt.value.values else "Object"
+                declared = f"Map<{key_type}, {val_type}>"
+
+            self.symbol_table.register_variable(stmt.name, declared)
+            code = f"{tab}{declared} {stmt.name} = new HashMap<>();\n"
+            for k, v in zip(stmt.value.keys, stmt.value.values):
+                code += f"{tab}{stmt.name}.put({self._generate_expr(k)}, {self._generate_expr(v)});\n"
+            return code
+
+        java_type = self._java_type(stmt.var_type)
+        name = java_name(stmt.name)
+        existing_type = self.symbol_table.lookup(name)
+
+        if stmt.value is None:
+            if existing_type:
+                return ""
+            self.symbol_table.register_variable(name, java_type)
+            return f"{tab}{java_type} {name};\n"
+
+        value = self._value_for(stmt.value, java_type)
+
+        if existing_type:
+            return f"{tab}{name} = {value};\n"
+
+        self.symbol_table.register_variable(name, java_type)
+        return f"{tab}{java_type} {name} = {value};\n"
+
+    def _value_for(self, value, java_type):
+        """value rendered for a slot of java_type (char literals, list builders)."""
+
+        if java_type == "char" and isinstance(value, Constant) and isinstance(value.value, str) \
+                and len(value.value) == 1:
+            return self._char(value.value)
+        return self._generate_expr(value)
+
+    def _for_loop(self, stmt, indent):
+
+        tab = "    " * indent
+        self.symbol_table.push()
+
+        try:
             if isinstance(stmt.iterable, RangeCall):
 
                 args = stmt.iterable.args
+                start = "0" if len(args) == 1 else self._generate_expr(args[0])
+                end = self._generate_expr(args[0] if len(args) == 1 else args[1])
+                name = java_name(stmt.iterator)
+                self.symbol_table.register_variable(name, "int")
 
-                if len(args) == 1:
-                    start = "0"
-                    end = self._generate_expr(args[0])
-                elif len(args) == 2:
-                    start = self._generate_expr(args[0])
-                    end = self._generate_expr(args[1])
+                if len(args) < 3:
+                    header = f"int {name} = {start}; {name} < {end}; {name}++"
                 else:
-                    start = self._generate_expr(args[0])
-                    end = self._generate_expr(args[1])
+                    step = args[2]
+                    if isinstance(step, Constant) and isinstance(step.value, int):
+                        compare = "<" if step.value > 0 else ">"
+                        update = f"{name} += {step.value}" if step.value > 0 else f"{name} -= {-step.value}"
+                        header = f"int {name} = {start}; {name} {compare} {end}; {update}"
+                    else:
+                        step_code = self._generate_expr(step)
+                        header = (f"int {name} = {start}; ({step_code}) > 0 ? {name} < {end} : "
+                                  f"{name} > {end}; {name} += {step_code}")
 
-                self.symbol_table.register_variable(stmt.iterator, "int")
+                body = "".join(self._generate_statement(s, indent + 1) for s in stmt.body)
+                return f"{tab}for ({header}) {{\n{body}{tab}}}\n"
 
-                return f"{tab}for (int {stmt.iterator} = {start}; {stmt.iterator} < {end}; {stmt.iterator}++) {{\n" + \
-                    "".join(self._generate_statement(s, indent + 1) for s in stmt.body) + \
-                    f"{tab}}}\n"
+            iterable_type = self._type(stmt.iterable) or self._infer_type(stmt.iterable)
 
-            iterable_expr = self._generate_expr(stmt.iterable)
-
-            iterable_type = self._infer_type(stmt.iterable)
-
-            if iterable_type.startswith("List<"):
-                element_type = iterable_type.split("<")[1].replace(">", "")
-            else:
-                element_type = "Object"
-
-            self.symbol_table.register_variable(stmt.iterator, element_type)
-
-            code = f"{tab}for ({element_type} {stmt.iterator} : {iterable_expr}) {{\n"
-
-            for s in stmt.body:
-                code += self._generate_statement(s, indent + 1)
-
-            code += f"{tab}}}\n"
-            return code
-        
-        if isinstance(stmt, DictPut):
-            return f"{tab}{self._generate_expr(stmt.dictionary)}.put({self._generate_expr(stmt.key)}, {self._generate_expr(stmt.value)});\n"
-        
-        if isinstance(stmt, PrintStatement):
-
-            parts = []
-
-            for arg in stmt.args:
-                if isinstance(arg, BinaryOp):
-                    parts.append(f"({self._generate_expr(arg)})")
+            if iterable_type == "String":
+                if self.source_lang == "python":
+                    # Iterating a Python string yields one-character strings.
+                    iterable = f"{self._receiver(stmt.iterable)}.split(\"\")"
+                    element_type = "String"
                 else:
-                    parts.append(self._generate_expr(arg))
-
-            if len(parts) == 1:
-                final_expr = parts[0]
+                    iterable = f"{self._receiver(stmt.iterable)}.toCharArray()"
+                    element_type = "char"
             else:
-                # Python's print separates its arguments with a space.
-                final_expr = ' + " " + '.join(parts)
+                iterable = self._generate_expr(stmt.iterable)
+                if iterable_type.startswith(("List<", "Set<")):
+                    element_type = self._fix_java_generics(iterable_type[iterable_type.index("<") + 1:-1])
+                else:
+                    element_type = "Object"
 
-            return f"{tab}System.out.println({final_expr});\n"
-        
-        
+            self.symbol_table.register_variable(java_name(stmt.iterator), element_type)
+            body = "".join(self._generate_statement(s, indent + 1) for s in stmt.body)
+            return f"{tab}for ({element_type} {java_name(stmt.iterator)} : {iterable}) {{\n{body}{tab}}}\n"
+        finally:
+            self.symbol_table.pop()
 
-        if isinstance(stmt, WhileLoop):
+    def _store(self, target, value):
+        """Assignment to a variable, field, list element or map entry."""
 
-            code = f"{tab}while ({self._generate_expr(stmt.condition)}) {{\n"
+        if isinstance(target, IndexAccess):
+            container = self._type(target.obj) or self.symbol_table.lookup(self._generate_expr(target.obj)) or ""
+            method = "put" if container.startswith("Map<") else "set"
+            return f"{self._receiver(target.obj)}.{method}({self._generate_expr(target.index)}, {value})"
+        return f"{self._generate_expr(target)} = {value}"
 
-            for s in stmt.body:
-                code += self._generate_statement(s, indent + 1)
+    def _aug_assign(self, stmt):
 
-            code += f"{tab}}}\n"
-            return code
-        
-        
-        
-        if isinstance(stmt, ListAppend):
+        op = stmt.operator
+        combined = self._binary(BinaryOp(stmt.target, op, stmt.value), declared_type=self._type(stmt.target))
 
-            element_type = self._infer_type(stmt.value)
+        if isinstance(stmt.target, IndexAccess) or op in ("FloorDiv", "FloorMod", "Pow"):
+            return self._store(stmt.target, combined)
 
-            wrapper = self._to_wrapper(element_type)
+        if op not in OPERATORS:
+            raise UnsupportedConstruct(f"augmented operator {op} cannot be written as Java")
 
-            list_name = self._generate_expr(stmt.list_obj)
+        value = self._generate_expr(stmt.value)
+        if op == "Div" and self._integral(self._type(stmt.target)):
+            # Python's x /= y makes x a float; the annotator typed x double,
+            # so reaching here means both really are integral in the source.
+            pass
+        return f"{self._generate_expr(stmt.target)} {OPERATORS[op]}= {value}"
 
-            existing_type = self.symbol_table.lookup(list_name)
+    # -------------------------------------------------
+    # OUTPUT
+    # -------------------------------------------------
 
-            if existing_type == "List<Object>":
-                new_type = f"List<{wrapper}>"
+    def _print(self, stmt):
 
-                self.symbol_table.register_variable(list_name, new_type)
+        args = list(stmt.args)
+        end = stmt.end
 
-            return f"{tab}{list_name}.add({self._generate_expr(stmt.value)});\n"
+        # printf / String.format with nothing else on the line.
+        if len(args) == 1 and isinstance(args[0], FormatString):
+            fmt = printf_format.to_java(args[0].fmt) + end.replace("%", "%%")
+            values = "".join(", " + self._generate_expr(a) for a in args[0].args)
+            return f"System.out.printf(Locale.ROOT, {self._literal(fmt)}{values});"
 
-        return ""
+        # cout << ... << endl
+        if end == "" and args and isinstance(args[-1], Constant) and args[-1].value == "\n":
+            args = args[:-1]
+            end = "\n"
+
+        pieces = []
+        for index, arg in enumerate(args):
+            if index and stmt.sep:
+                pieces.append((self._literal(stmt.sep), True, None))
+            pieces.append((self._text(arg), self._is_text(arg), arg))
+
+        if end not in ("", "\n"):
+            pieces.append((self._literal(end), True, None))
+
+        method = "println" if end == "\n" else "print"
+        if not pieces:
+            return f"System.out.{method}();" if method == "println" else 'System.out.print("");'
+        return f"System.out.{method}({self._concat(pieces)});"
+
+    def _concat(self, pieces):
+
+        if len(pieces) == 1:
+            return pieces[0][0]
+
+        out = []
+        for index, (code, is_text, node) in enumerate(pieces):
+            if node is not None:
+                code = prec.operand(code, node, "Add", LANG, right=index > 0)
+            out.append(code)
+
+        # Java's + only concatenates once a String is involved.
+        prefix = "" if pieces[0][1] or pieces[1][1] else '"" + '
+        return prefix + " + ".join(out)
+
+    def _is_text(self, expr):
+        return self._type(expr) in ("String", "char") or isinstance(expr, FormatString) or (
+            isinstance(expr, Constant) and isinstance(expr.value, str)
+        ) or self._shown_as_text(expr)
+
+    def _shown_as_text(self, expr):
+        kind = self._type(expr)
+        if self.source_lang == "python" and (kind == "boolean" or (isinstance(expr, Constant) and expr.value is None)):
+            return True
+        return self.source_lang in ("c++", "cpp") and kind == "double"
+
+    def _text(self, expr):
+        """Java expression printing exactly what the source printed for expr."""
+
+        code = self._generate_expr(expr)
+        kind = self._type(expr)
+
+        if self.source_lang == "python":
+            if kind == "boolean":
+                return f'({code} ? "True" : "False")'
+            if isinstance(expr, Constant) and expr.value is None:
+                return '"None"'
+
+        if self.source_lang in ("c++", "cpp"):
+            if kind == "boolean":
+                return f"({code} ? 1 : 0)"
+            if kind == "double":
+                self.helpers.add("fmtG")
+                return f"fmtG({code})"
+
+        return code
 
     # -------------------------------------------------
     # EXPRESSIONS
     # -------------------------------------------------
+
+    def _receiver(self, expr):
+        return prec.postfix_operand(self._generate_expr(expr), expr, LANG)
+
+    def _condition(self, expr):
+        """A Java boolean for a value the source tests for truth.
+
+        C tests ints against zero and Python tests any value for emptiness;
+        Java accepts only booleans.
+        """
+
+        code = self._generate_expr(expr)
+        kind = self._type(expr) or ""
+
+        if kind in ("int", "long", "char", "double"):
+            return f"{prec.operand(code, expr, 'NotEq', LANG)} != 0"
+        if self.source_lang == "python" and (kind == "String" or kind.startswith(("List<", "Set<", "Map<"))):
+            return f"!{self._receiver(expr)}.isEmpty()"
+        return code
+
+    def _condition_operand(self, expr, parent, right=False):
+        plain = self._generate_expr(expr)
+        test = self._condition(expr)
+        if test != plain:
+            return f"({test})"  # a synthesized comparison is always grouped
+        if parent == "Not":
+            return prec.unary_operand(test, expr, LANG)
+        return prec.operand(test, expr, parent, LANG, right=right)
+
+    @staticmethod
+    def _integral(kind):
+        return kind in ("int", "long", "char", None, "Object")
+
+    def _char(self, value):
+        escaped = {"'": "\\'", "\\": "\\\\", "\n": "\\n", "\t": "\\t", "\r": "\\r", "\0": "\\0"}.get(value, value)
+        return f"'{escaped}'"
+
+    def _binary(self, expr, declared_type=None):
+
+        op = expr.operator
+        left_type, right_type = self._type(expr.left), self._type(expr.right)
+
+        def side(node, right=False, parent=op):
+            return prec.operand(self._generate_expr(node), node, parent, LANG, right=right)
+
+        if op == "Pow":
+            call = f"Math.pow({self._generate_expr(expr.left)}, {self._generate_expr(expr.right)})"
+            result = declared_type or self._type(expr)
+            if result in ("int", "long"):
+                return f"({result}) {call}"
+            return call
+
+        if op in ("FloorDiv", "FloorMod"):
+            left, right = self._generate_expr(expr.left), self._generate_expr(expr.right)
+            if "double" in (left_type, right_type):
+                quotient = f"Math.floor({side(expr.left, parent='Div')} / {side(expr.right, True, 'Div')})"
+                if op == "FloorDiv":
+                    return quotient
+                return f"{side(expr.left, parent='Sub')} - {side(expr.right, parent='Mult')} * {quotient}"
+            return f"Math.{'floorDiv' if op == 'FloorDiv' else 'floorMod'}({left}, {right})"
+
+        if op not in OPERATORS:
+            raise UnsupportedConstruct(f"operator {op} cannot be written as Java")
+
+        left = side(expr.left)
+        right = side(expr.right, right=True)
+
+        # Python's / is always float division; Java's / on two ints is not.
+        if op == "Div" and self._integral(left_type) and self._integral(right_type) \
+                and self.source_lang == "python":
+            left = f"(double) {prec.unary_operand(self._generate_expr(expr.left), expr.left, LANG)}"
+
+        if self.source_lang != "python" or op != "Add":
+            pass
+
+        return f"{left} {OPERATORS[op]} {right}"
+
+    def _comparison(self, expr):
+
+        op = expr.operator
+        left_node, right_node = expr.left, expr.right
+        left_type, right_type = self._type(left_node), self._type(right_node)
+
+        if op in ("In", "NotIn"):
+            container_type = right_type or ""
+            method = "containsKey" if container_type.startswith("Map<") else "contains"
+            needle = self._generate_expr(left_node)
+            if container_type == "String" and left_type != "String":
+                needle = f"String.valueOf({needle})"
+            test = f"{self._receiver(right_node)}.{method}({needle})"
+            return test if op == "In" else f"!{test}"
+
+        if op in ("Eq", "NotEq"):
+            # A char compared with a one-letter literal is a char comparison.
+            for node, other_type in ((right_node, left_type), (left_node, right_type)):
+                if other_type == "char" and isinstance(node, Constant) and isinstance(node.value, str) \
+                        and len(node.value) == 1:
+                    left = self._char(left_node.value) if node is left_node else self._comparison_side(left_node, op)
+                    right = self._char(right_node.value) if node is right_node else self._comparison_side(right_node, op, True)
+                    return f"{left} {COMPARISONS[op]} {right}"
+
+            text_types = ("String",)
+            if (left_type in text_types or right_type in text_types) and not (
+                isinstance(left_node, Constant) and left_node.value is None
+                or isinstance(right_node, Constant) and right_node.value is None
+            ):
+                # == on Strings compares references in Java.
+                test = f"Objects.equals({self._generate_expr(left_node)}, {self._generate_expr(right_node)})"
+                return test if op == "Eq" else f"!{test}"
+
+        if op not in COMPARISONS:
+            raise UnsupportedConstruct(f"comparison {op} cannot be written as Java")
+
+        if op in ("And", "Or"):
+            left = self._condition_operand(left_node, op)
+            right = self._condition_operand(right_node, op, True)
+            return f"{left} {COMPARISONS[op]} {right}"
+
+        left = self._comparison_side(left_node, op)
+        right = self._comparison_side(right_node, op, True)
+        return f"{left} {COMPARISONS[op]} {right}"
+
+    def _comparison_side(self, node, op, right=False):
+        return prec.operand(self._generate_expr(node), node, op, LANG, right=right)
+
+    def _cast(self, expr):
+
+        target = expr.target_type
+        source = self._type(expr.value)
+        inner = self._generate_expr(expr.value)
+        operand = prec.unary_operand(inner, expr.value, LANG)
+
+        if target in ("int", "long"):
+            if source == "String":
+                parser = "Integer.parseInt" if target == "int" else "Long.parseLong"
+                return f"{parser}({self._receiver(expr.value)}.trim())"
+            return f"({target}) {operand}"
+
+        if target in ("float", "double"):
+            if source == "String":
+                return f"Double.parseDouble({self._receiver(expr.value)}.trim())"
+            return f"(double) {operand}"
+
+        if target in ("str", "String"):
+            if self.source_lang == "python" and source == "boolean":
+                return f'({inner} ? "True" : "False")'
+            return f"String.valueOf({inner})"
+
+        if target == "char":
+            return f"(char) {operand}"
+
+        raise UnsupportedConstruct(f"cast to {target} cannot be written as Java")
+
+    def _call(self, expr):
+
+        args = ", ".join(self._generate_expr(a) for a in expr.args)
+
+        if expr.name in ("min", "max") and len(expr.args) == 1:
+            return f"Collections.{expr.name}({args})"
+
+        if expr.name == "sum" and len(expr.args) == 1:
+            element = self._type(expr) or "int"
+            mapper = {"double": "mapToDouble(Double::doubleValue)",
+                      "long": "mapToLong(Long::longValue)"}.get(element, "mapToInt(Integer::intValue)")
+            return f"{self._receiver(expr.args[0])}.stream().{mapper}.sum()"
+
+        if expr.name in ("sqrt", "pow", "abs", "max", "min", "floor", "ceil"):
+            return f"Math.{expr.name}({args})"
+
+        character = {"isupper": "isUpperCase", "islower": "isLowerCase", "isdigit": "isDigit",
+                     "isalpha": "isLetter", "isspace": "isWhitespace", "isalnum": "isLetterOrDigit",
+                     "toupper": "toUpperCase", "tolower": "toLowerCase"}
+        if expr.name in character and len(expr.args) == 1:
+            return f"Character.{character[expr.name]}({args})"
+
+        if expr.name == "range_array":
+            if len(expr.args) != 1:
+                raise UnsupportedConstruct("multi-dimensional arrays in Java output")
+            default = {"double": "0.0", "boolean": "false", "char": "'\\0'", "long": "0L",
+                       "String": "null"}.get(getattr(expr, "element_type", "int"), "0")
+            return f"new ArrayList<>(Collections.nCopies({args}, {default}))"
+
+        return f"{expr.name}({args})"
 
     def _generate_expr(self, expr):
 
@@ -502,19 +802,26 @@ class JavaGenerator:
             return "this"
 
         if isinstance(expr, AttributeAccess):
-            return f"{self._generate_expr(expr.obj)}.{expr.attribute}"
+            return f"{self._receiver(expr.obj)}.{expr.attribute}"
 
         if isinstance(expr, UnaryOp):
             op_map = {"USub": "-", "UAdd": "+", "Not": "!", "Invert": "~"}
-            operand = self._generate_expr(expr.operand)
-            if isinstance(expr.operand, (BinaryOp, BooleanOp, TernaryOp)):
-                operand = f"({operand})"
-            return f"{op_map.get(expr.operator, '-')}{operand}"
+            if expr.operator not in op_map:
+                raise UnsupportedConstruct(f"unary operator {expr.operator}")
+            if expr.operator == "Not":
+                return f"!{self._condition_operand(expr.operand, 'Not')}"
+            operand = prec.unary_operand(self._generate_expr(expr.operand), expr.operand, LANG)
+            return f"{op_map[expr.operator]}{operand}"
 
         if isinstance(expr, TernaryOp):
+            condition = self._condition(expr.condition)
+            if condition != self._generate_expr(expr.condition):
+                condition = f"({condition})"
+            else:
+                condition = prec.ternary_part(condition, expr.condition)
             return (
-                f"{self._generate_expr(expr.condition)} ? "
-                f"{self._generate_expr(expr.if_true)} : "
+                f"{condition} ? "
+                f"{prec.ternary_part(self._generate_expr(expr.if_true), expr.if_true)} : "
                 f"{self._generate_expr(expr.if_false)}"
             )
 
@@ -523,30 +830,35 @@ class JavaGenerator:
             for part in expr.parts:
                 if isinstance(part, Constant) and isinstance(part.value, str):
                     if part.value:
-                        parts.append(f'"{self._escape(part.value)}"')
+                        parts.append(self._literal(part.value))
                 else:
-                    parts.append(self._generate_expr(part))
-            return " + ".join(parts) if parts else '""'
+                    parts.append(prec.operand(self._text(part), part, "Add", LANG, right=True))
+            if not parts:
+                return '""'
+            if not (expr.parts and isinstance(expr.parts[0], Constant) and isinstance(expr.parts[0].value, str)
+                    and expr.parts[0].value):
+                parts.insert(0, '""')
+            return " + ".join(parts)
+
+        if isinstance(expr, FormatString):
+            fmt = printf_format.to_java(expr.fmt)
+            values = "".join(", " + self._generate_expr(a) for a in expr.args)
+            return f"String.format(Locale.ROOT, {self._literal(fmt)}{values})"
 
         if isinstance(expr, IndexAccess):
-            container = self._generate_expr(expr.obj)
+            if getattr(expr, "c_string", False):
+                self.helpers.add("charAt")
+                return f"charAt({self._generate_expr(expr.obj)}, {self._generate_expr(expr.index)})"
+            container_type = self._type(expr.obj) or self.symbol_table.lookup(self._generate_expr(expr.obj)) or ""
             index = self._generate_expr(expr.index)
-            container_type = self.symbol_table.lookup(container) or ""
-            if container_type.startswith("Map<"):
-                return f"{container}.get({index})"
-            return f"{container}.get({index})"
+            if container_type == "String":
+                char = f"{self._receiver(expr.obj)}.charAt({index})"
+                # Python has no char type: indexing a string gives a string.
+                return f"String.valueOf({char})" if self.source_lang == "python" else char
+            return f"{self._receiver(expr.obj)}.get({index})"
 
         if isinstance(expr, TypeCast):
-
-            inner = self._generate_expr(expr.value)
-
-            if expr.target_type == "int":
-                return f"Integer.parseInt({inner})"
-
-            if expr.target_type == "float":
-                return f"Double.parseDouble({inner})"
-
-            return inner
+            return self._cast(expr)
 
         if isinstance(expr, Constant):
 
@@ -557,65 +869,23 @@ class JavaGenerator:
                 return str(expr.value).lower()
 
             if isinstance(expr.value, str):
-                return f'"{self._escape(expr.value)}"'
+                if getattr(expr, "is_char", False) and len(expr.value) == 1:
+                    return self._char(expr.value)
+                return self._literal(expr.value)
 
-            return str(expr.value)
+            if isinstance(expr.value, int) and not -2**31 <= expr.value < 2**31:
+                return f"{expr.value}L"
+
+            return repr(expr.value) if isinstance(expr.value, float) else str(expr.value)
 
         if isinstance(expr, Identifier):
-            return expr.name
+            return java_name(expr.name)
 
         if isinstance(expr, BinaryOp):
-
-            left = self._generate_expr(expr.left)
-            right = self._generate_expr(expr.right)
-
-            # Java's ^ is XOR, not exponentiation.
-            if expr.operator == "Pow":
-                call = f"Math.pow({left}, {right})"
-                integral = (
-                    self._infer_type(expr.left) in ("int", "Integer")
-                    and self._infer_type(expr.right) in ("int", "Integer")
-                )
-                return f"(int) {call}" if integral else call
-
-            op_map = {
-                "Add": "+",
-                "Sub": "-",
-                "Mult": "*",
-                "Div": "/",
-                "FloorDiv": "/",
-                "Mod": "%"
-            }
-
-            operator = op_map.get(expr.operator, "+")
-
-            # Python's / is always float division; Java's / on two ints is not.
-            if (
-                expr.operator == "Div"
-                and self.source_lang == "python"
-                and self._infer_type(expr.left) in ("int", "Integer")
-                and self._infer_type(expr.right) in ("int", "Integer")
-            ):
-                left = f"(double) {left}"
-
-            return f"{left} {operator} {right}"
+            return self._binary(expr)
 
         if isinstance(expr, BooleanOp):
-
-            op_map = {
-                "And": "&&",
-                "Or": "||",
-                "Eq": "==",
-                "NotEq": "!=",
-                "Lt": "<",
-                "Gt": ">",
-                "LtE": "<=",
-                "GtE": ">="
-            }
-
-            op = op_map.get(expr.operator, "==")
-
-            return f"{self._generate_expr(expr.left)} {op} {self._generate_expr(expr.right)}"
+            return self._comparison(expr)
 
         if isinstance(expr, ArrayLiteral):
 
@@ -624,29 +894,25 @@ class JavaGenerator:
             if not expr.elements:
                 return "new ArrayList<>()"
 
-            element_type = self._infer_type(expr.elements[0])
-
-            wrapper_map = {
-                "int": "Integer",
-                "float": "Double",
-                "bool": "Boolean",
-                "str": "String"
-            }
-
-            element_type = wrapper_map.get(element_type, element_type)
-
+            element_type = self._to_wrapper(self._java_type(self._type(expr.elements[0]) or "Object"))
             return f"new ArrayList<{element_type}>(Arrays.asList({elements}))"
-                
+
         if isinstance(expr, Input):
+            if self.source_lang == "python" and expr.value_type in ("int", "long", "double"):
+                # int(input()) parses a whole line, not the next word.
+                parser = {"int": "Integer.parseInt", "long": "Long.parseLong",
+                          "double": "Double.parseDouble"}[expr.value_type]
+                return f"{parser}(sc.nextLine().trim())"
             return {
                 "int": "sc.nextInt()",
+                "long": "sc.nextLong()",
                 "double": "sc.nextDouble()",
                 "token": "sc.next()",
+                "char": "sc.next().charAt(0)",
             }.get(expr.value_type, "sc.nextLine()")
-        
+
         if isinstance(expr, FunctionCall):
-            args = ", ".join(self._generate_expr(a) for a in expr.args)
-            return f"{expr.name}({args})"
+            return self._call(expr)
 
         if isinstance(expr, ObjectCreation):
             args = ", ".join(self._generate_expr(a) for a in (expr.arguments or []))
@@ -660,7 +926,7 @@ class JavaGenerator:
                 return "new HashSet<>()"
 
             return f"new HashSet<>(Arrays.asList({elements}))"
-        
+
         if isinstance(expr, MethodCall):
 
             method_map = {
@@ -694,27 +960,35 @@ class JavaGenerator:
 
             args = ", ".join(self._generate_expr(a) for a in expr.args)
 
+            # A user-defined object's methods mean what its class says.
+            if isinstance(expr.obj, SelfRef) or self._type(expr.obj) in self.class_names:
+                return f"{self._receiver(expr.obj)}.{expr.method}({args})"
+
             # len() lowers to size(), but a Java String measures with length().
-            if expr.method == "size" and self._infer_type(expr.obj) == "String":
-                return f"{self._generate_expr(expr.obj)}.length()"
+            if expr.method == "size" and (self._type(expr.obj) or self._infer_type(expr.obj)) == "String":
+                return f"{self._receiver(expr.obj)}.length()"
 
             # Python's bare split() tokenises on any whitespace; wrapping the
             # resulting String[] keeps it indexable like every other list.
             if expr.method == "split" and not expr.args:
                 return (
-                    f'Arrays.asList({self._generate_expr(expr.obj)}'
+                    f'Arrays.asList({self._receiver(expr.obj)}'
                     f'.trim().split("\\\\s+"))'
                 )
 
-            if expr.method == "remove":
+            if expr.method == "remove" and expr.args:
 
                 arg = self._generate_expr(expr.args[0])
 
                 # Force wrapper for list removal
-                return f"{self._generate_expr(expr.obj)}.remove(Integer.valueOf({arg}))"
-            return f"{self._generate_expr(expr.obj)}.{java_method}({args})"
+                return f"{self._receiver(expr.obj)}.remove(Integer.valueOf({arg}))"
 
-        return "null"
+            if expr.method == "sort" and not expr.args:
+                return f"Collections.sort({self._generate_expr(expr.obj)})"
+
+            return f"{self._receiver(expr.obj)}.{java_method}({args})"
+
+        raise UnsupportedConstruct(f"expression {type(expr).__name__} cannot be written as Java")
 
     # -------------------------------------------------
     # SIMPLE TYPE INFERENCE
@@ -732,81 +1006,50 @@ class JavaGenerator:
             return "boolean" if value.operator == "Not" else self._infer_type(value.operand)
 
         if isinstance(value, AttributeAccess):
-            current = getattr(self, "current_class", None)
+            current = self.current_class
             if current:
                 for field in current.fields:
                     if field.name == value.attribute:
                         return self._java_type(field.field_type)
             return "Object"
 
-        # -------- CONSTANT --------
         if isinstance(value, Constant):
+
+            if isinstance(value.value, bool):
+                return "boolean"
 
             if isinstance(value.value, int):
                 return "int"
 
             if isinstance(value.value, float):
-                return "float"
-
-            if isinstance(value.value, bool):
-                return "bool"
+                return "double"
 
             if isinstance(value.value, str):
-                return "str"
+                return "String"
 
-        # -------- ARRAY LITERAL --------
         if isinstance(value, ArrayLiteral):
 
             if not value.elements:
                 return "List<Object>"
 
-            first_type = self._infer_type(value.elements[0])
+            return f"List<{self._to_wrapper(self._infer_type(value.elements[0]))}>"
 
-            primitive_map = {
-                    "int": "Integer",
-                    "float": "Double",
-                    "bool": "Boolean",
-                    "str": "String"
-            }
-
-            wrapper = primitive_map.get(first_type, "Object")
-
-            return f"List<{wrapper}>"
-
-        # -------- IDENTIFIER --------
         if isinstance(value, Identifier):
             var_type = self.symbol_table.lookup(value.name)
             if var_type:
                 return var_type
 
-        # -------- BINARY OP --------
         if isinstance(value, BinaryOp):
             left_type = self._infer_type(value.left)
             right_type = self._infer_type(value.right)
 
             if left_type == "double" or right_type == "double":
-                return "float"
+                return "double"
 
             return "int"
-        
-        if isinstance(value, SetLiteral):
-
-            if not value.elements:
-                return "Set<Object>"
-
-            element_type = self._infer_type(value.elements[0])
-
-            mapped_type = self.mapper.map(
-                element_type,
-                self.source_lang,
-                self.target_lang
-            )
-
-            wrapper = self._to_wrapper(mapped_type)
-
-            return f"Set<{wrapper}>"
 
         return "Object"
+
     def _program_uses_input(self, program):
 
         def check_node(node):
@@ -837,18 +1080,18 @@ class JavaGenerator:
     def _fix_java_generics(self, type_str):
 
         replacements = {
-            "List<int>": "List<Integer>",
-            "List<float>": "List<Double>",
-            "List<bool>": "List<Boolean>",
-            "List<char>": "List<Character>",
-
-            "Set<int>": "Set<Integer>",
-            "Set<float>": "Set<Double>",
-            "Set<bool>": "Set<Boolean>",
-
-            "Map<int,": "Map<Integer,",
-            "Map<float,": "Map<Double,",
-            "Map<bool,": "Map<Boolean,"
+            "<int>": "<Integer>",
+            "<long>": "<Long>",
+            "<float>": "<Double>",
+            "<double>": "<Double>",
+            "<bool>": "<Boolean>",
+            "<boolean>": "<Boolean>",
+            "<char>": "<Character>",
+            "<int,": "<Integer,",
+            "<float,": "<Double,",
+            "<bool,": "<Boolean,",
+            ", int>": ", Integer>",
+            ", double>": ", Double>",
         }
 
         for k, v in replacements.items():

@@ -1,133 +1,243 @@
+"""Python 2 -> 3 upgrader: textual syntax rules, then AST-based semantic rules.
+
+Syntax rules run on a masked copy of the source, so string literals and comments are
+never rewritten. Once the code parses as Python 3, the integer-division rule uses the
+AST to find `/` whose operands are provably integers and keeps Python 2's floor
+semantics with `//`.
+"""
+
+import ast
 import re
 
-from version_upgrade_system.languages.python.enterprise_engine.confidence_engine import PythonVersionConfidence
-from version_upgrade_system.languages.python.enterprise_engine.diff_generator import DiffGenerator
-from version_upgrade_system.languages.python.enterprise_engine.risk_analyzer import PythonRiskAnalyzer
-from version_upgrade_system.languages.python.enterprise_engine.validator import PythonValidator
+from version_upgrade_system.core.gated import GatedUpgrader, Rule
+from version_upgrade_system.core.textscan import group, mask, matching, splice, sub
 from version_upgrade_system.languages.python.enterprise_engine.version_detector import PythonVersionDetector
 
+LANG = "python"
 
-class PythonEnterpriseUpgrader:
 
-    def __init__(self):
-        self.confidence = PythonVersionConfidence()
-        self.risk = PythonRiskAnalyzer()
-        self.validator = PythonValidator()
-        self.detector = PythonVersionDetector()
-        self.diff = DiffGenerator()
+def _regex_rule(name, pattern, replacement):
+    def apply(code):
+        return sub(pattern, lambda m, src: m.expand(replacement), code, LANG)
+    return Rule(name, apply)
 
-    # -----------------------------------
-    # PYTHON 2 -> 3 RULES
-    #
-    # (pattern, replacement, description). Applied to whole lines, so the
-    # indentation captured by each pattern is preserved.
-    # -----------------------------------
-    RULES = [
-        (r'\.iteritems\(\)', '.items()', "dict.iteritems() -> items()"),
-        (r'\.iterkeys\(\)', '.keys()', "dict.iterkeys() -> keys()"),
-        (r'\.itervalues\(\)', '.values()', "dict.itervalues() -> values()"),
-        (r'\bxrange\(', 'range(', "xrange() -> range()"),
-        (r'\braw_input\(', 'input(', "raw_input() -> input()"),
-        (r'\bbasestring\b', 'str', "basestring -> str"),
-        (r'\bunicode\(', 'str(', "unicode() -> str()"),
-        (r'\blong\(', 'int(', "long() -> int()"),
-        (r'<>', '!=', "<> -> !="),
-        (r'^(\s*)except\s+([\w.]+)\s*,\s*(\w+)\s*:', r'\1except \2 as \3:',
-         "except X, e -> except X as e"),
-        (r'(\w+)\.has_key\((.+?)\)', r'\2 in \1', "dict.has_key(k) -> k in dict"),
-    ]
 
-    def safe_print_upgrade(self, code):
+def _print_statements(code):
+    masked = mask(code, LANG)
+    edits = []
+    # A statement start: line start, or after the colon of a one-line compound statement.
+    for match in re.finditer(r"(^[ \t]*|:[ \t]*)print\b(?![ \t]*\()([^\n]*)$", masked, re.MULTILINE):
+        start, end = match.start(2), match.end(2)
+        masked_content = masked[start:end].strip()
+        if masked_content.startswith("="):
+            continue  # an assignment to a variable named print
+        content = code[start:end].strip()
+        stream = ""
+        if masked_content.startswith(">>"):
+            target, _, rest = content[2:].partition(",")
+            stream, content = f"file={target.strip()}", rest.strip()
+        ending = ""
+        if content.endswith(","):
+            content, ending = content[:-1].rstrip(), 'end=" "'
+        arguments = ", ".join(part for part in (content, ending, stream) if part)
+        edits.append((match.start(0) + len(match.group(1)), end, f"print({arguments})"))
+    return splice(code, edits)
 
-        pattern = r'^(\s*)print\s+(.*)$'
-        lines = code.splitlines()
-        new_lines = []
+
+def _has_key(code):
+    masked = mask(code, LANG)
+    edits = []
+    for match in re.finditer(r"([A-Za-z_][\w.]*)\.has_key\(", masked):
+        close = matching(masked, match.end() - 1)
+        if close == -1:
+            continue
+        key = code[match.end():close].strip()
+        # Parenthesised so `d.has_key(k) == x` does not become a chained comparison.
+        edits.append((match.start(), close + 1, f"({key} in {match.group(1)})"))
+    return splice(code, edits)
+
+
+def _raise_comma(code):
+    def replace(match, src):
+        return f"raise {group(match, src, 1)}({group(match, src, 2).strip()})"
+    return sub(r"\braise[ \t]+([A-Za-z_][\w.]*)[ \t]*,[ \t]*([^\n]+?)[ \t]*$", replace, code, LANG)
+
+
+def _list_views(code):
+    """`x = d.keys()` returned a list in Python 2; keep it a list where it is stored."""
+    masked = mask(code, LANG)
+    edits = []
+    for match in re.finditer(r"^[ \t]*[A-Za-z_]\w*[ \t]*=[ \t]*", masked, re.MULTILINE):
+        start = match.end()
+        line_end = masked.find("\n", start)
+        line_end = len(masked) if line_end == -1 else line_end
+        value = masked[start:line_end].rstrip()
+        if re.fullmatch(r"[\w.]+\.(keys|values|items)\(\)", value):
+            edits.append((start, start + len(value), f"list({code[start:start + len(value)]})"))
+        elif re.match(r"(map|filter|zip)\(", value):
+            close = matching(masked, start + value.index("("))
+            if close == start + len(value) - 1:
+                edits.append((start, close + 1, f"list({code[start:close + 1]})"))
+    return splice(code, edits)
+
+
+def _int_names(tree):
+    """Names whose every binding is provably an int."""
+    bindings = {}
+
+    def bind(name, value):
+        bindings.setdefault(name, []).append(value)
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    bind(target.id, node.value)
+                else:
+                    for element in ast.walk(target):
+                        if isinstance(element, ast.Name):
+                            bind(element.id, None)
+        elif isinstance(node, (ast.AugAssign, ast.AnnAssign)) and isinstance(node.target, ast.Name):
+            value = node.value
+            if isinstance(node, ast.AugAssign):
+                value = ast.BinOp(left=ast.Name(id=node.target.id, ctx=ast.Load()), op=node.op, right=node.value)
+            bind(node.target.id, value)
+        elif isinstance(node, ast.For):
+            iterator = node.iter
+            is_range = (isinstance(iterator, ast.Call) and isinstance(iterator.func, ast.Name)
+                        and iterator.func.id == "range" and isinstance(node.target, ast.Name))
+            for element in ast.walk(node.target):
+                if isinstance(element, ast.Name):
+                    bind(element.id, iterator if is_range else None)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            arguments = node.args
+            for argument in arguments.posonlyargs + arguments.args + arguments.kwonlyargs:
+                bind(argument.arg, None)
+            for argument in (arguments.vararg, arguments.kwarg):
+                if argument:
+                    bind(argument.arg, None)
+        elif isinstance(node, (ast.With, ast.ExceptHandler, ast.comprehension, ast.NamedExpr,
+                               ast.Global, ast.Nonlocal, ast.Import, ast.ImportFrom)):
+            for element in ast.walk(node):
+                if isinstance(element, ast.Name) and isinstance(element.ctx, ast.Store):
+                    bind(element.id, None)
+            if isinstance(node, (ast.Global, ast.Nonlocal)):
+                for name in node.names:
+                    bind(name, None)
+            if isinstance(node, ast.ExceptHandler) and node.name:
+                bind(node.name, None)
+
+    known = set()
+
+    def is_int(expr):
+        if isinstance(expr, ast.Constant):
+            return type(expr.value) is int
+        if isinstance(expr, ast.Name):
+            return expr.id in known
+        if isinstance(expr, ast.UnaryOp) and isinstance(expr.op, (ast.USub, ast.UAdd, ast.Invert)):
+            return is_int(expr.operand)
+        if isinstance(expr, ast.BinOp) and isinstance(expr.op, (ast.Add, ast.Sub, ast.Mult,
+                                                                 ast.FloorDiv, ast.Mod, ast.Div)):
+            return is_int(expr.left) and is_int(expr.right)
+        if isinstance(expr, ast.Call) and isinstance(expr.func, ast.Name) and len(expr.args) >= 1:
+            if expr.func.id in ("int", "len", "ord"):
+                return True
+            if expr.func.id == "range":
+                return all(is_int(a) for a in expr.args)
+            if expr.func.id == "abs" and len(expr.args) == 1:
+                return is_int(expr.args[0])
+        return False
+
+    changed = True
+    while changed:
         changed = False
-
-        for line in lines:
-            match = re.match(pattern, line)
-            if match:
-                indent = match.group(1)
-                content = match.group(2).rstrip()
-                new_lines.append(f'{indent}print({content})')
+        for name, values in bindings.items():
+            if name not in known and all(v is not None and is_int(v) for v in values):
+                known.add(name)
                 changed = True
-            else:
-                new_lines.append(line)
+    return is_int
 
-        return "\n".join(new_lines), changed
 
-    def _apply_rules(self, code):
-        """Run every modernization rule, reporting which ones actually fired."""
+def _int_division(code):
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return code
+    is_int = _int_names(tree)
 
-        applied = []
+    lines = code.splitlines(keepends=True)
+    offsets = [0]
+    for line in lines:
+        offsets.append(offsets[-1] + len(line))
+    masked = mask(code, LANG)
 
-        code, printed = self.safe_print_upgrade(code)
-        if printed:
-            applied.append("Python2 to Python3 print modernization")
+    def position(line, column):
+        text = lines[line - 1].encode("utf-8")[:column].decode("utf-8", "ignore")
+        return offsets[line - 1] + len(text)
 
-        for pattern, replacement, description in self.RULES:
-            updated, count = re.subn(pattern, replacement, code, flags=re.MULTILINE)
-            if count:
-                code = updated
-                applied.append(description)
+    edits = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div) \
+                and is_int(node.left) and is_int(node.right):
+            start = position(node.left.end_lineno, node.left.end_col_offset)
+            end = position(node.right.lineno, node.right.col_offset)
+            slash = masked.find("/", start, end)
+            if slash != -1 and masked[slash + 1] != "/":
+                edits.append((slash, slash + 1, "//"))
+        elif isinstance(node, ast.AugAssign) and isinstance(node.op, ast.Div) \
+                and is_int(node.target) and is_int(node.value):
+            start = position(node.target.end_lineno, node.target.end_col_offset)
+            end = position(node.value.lineno, node.value.col_offset)
+            slash = masked.find("/=", start, end)
+            if slash != -1:
+                edits.append((slash, slash + 2, "//="))
+    return splice(code, edits)
 
-        return code, applied
 
-    def upgrade(self, code):
+def _true_divisions(code):
+    try:
+        tree = ast.parse(code)
+    except SyntaxError:
+        return 0
+    return sum(1 for node in ast.walk(tree)
+               if isinstance(node, (ast.BinOp, ast.AugAssign)) and isinstance(node.op, ast.Div))
 
-        original = code
 
-        # --------------------------
-        # Safe upgrade logic
-        # --------------------------
-        upgraded, applied_rules = self._apply_rules(code)
+class PythonEnterpriseUpgrader(GatedUpgrader):
 
-        # --------------------------
-        # Validation
-        # --------------------------
-        validation = self.validator.validate(upgraded)
+    language = LANG
+    engine = "Python 2 to 3 engine (validation-gated)"
+    detector = PythonVersionDetector()
 
-        # A rule that breaks the file is worse than no upgrade at all.
-        if not validation["compile_success"] and self.validator.validate(original)["compile_success"]:
-            upgraded = original
-            applied_rules = []
-            validation = self.validator.validate(original)
+    def rules(self, code):
+        return [
+            Rule("print statement -> print()", _print_statements),
+            Rule("except X, e -> except X as e", lambda c: sub(
+                r"^([ \t]*except[ \t]+)([\w.]+|\([^)\n]*\))[ \t]*,[ \t]*(\w+)[ \t]*:",
+                lambda m, src: f"{group(m, src, 1)}{group(m, src, 2)} as {group(m, src, 3)}:", c, LANG)),
+            Rule("raise E, msg -> raise E(msg)", _raise_comma),
+            Rule("exec statement -> exec()", lambda c: sub(
+                r"^([ \t]*)exec[ \t]+(?!\()([^\n]+)$",
+                lambda m, src: f"{group(m, src, 1)}exec({group(m, src, 2).strip()})", c, LANG)),
+            _regex_rule("<> -> !=", r"<>", "!="),
+            _regex_rule("xrange() -> range()", r"\bxrange\(", "range("),
+            _regex_rule("raw_input() -> input()", r"\braw_input\(", "input("),
+            _regex_rule("dict.iteritems() -> items()", r"\.iteritems\(\)", ".items()"),
+            _regex_rule("dict.iterkeys() -> keys()", r"\.iterkeys\(\)", ".keys()"),
+            _regex_rule("dict.itervalues() -> values()", r"\.itervalues\(\)", ".values()"),
+            Rule("dict.has_key(k) -> k in dict", _has_key),
+            _regex_rule("basestring -> str", r"\bbasestring\b", "str"),
+            _regex_rule("unicode() -> str()", r"\bunicode\(", "str("),
+            _regex_rule("long() -> int()", r"\blong\(", "int("),
+            _regex_rule("octal 0NNN -> 0oNNN", r"(?<![\w.])0([0-7]+)\b", r"0o\1"),
+            Rule("stored keys()/values()/items()/map()/filter()/zip() -> list()", _list_views),
+            Rule("integer / -> // (operands proven int)", _int_division),
+        ]
 
-        # --------------------------
-        # Risk Analysis
-        # --------------------------
-        risk_data = self.risk.compute(original, upgraded, applied_rules)
-
-        # --------------------------
-        # Diff Calculation
-        # --------------------------
-        diff_data = self.diff.generate(original, upgraded)
-        total_diff_changes = diff_data["total_changes"]
-
-        # --------------------------
-        # ML Confidence
-        # --------------------------
-        confidence_score = self.confidence.calculate_confidence(
-            changes_count=total_diff_changes,
-            risky_changes=risk_data["risk_score"],
-            syntax_valid=validation["compile_success"],
-            semantic_valid=validation["validation_status"] == "PASS",
-            test_passed=validation["test_success"],
-            diff_ratio=risk_data["diff_ratio"]
-        )
-
-        return {
-            "code": upgraded,
-            "engine": "Python Enterprise Engine",
-            "detected_version": self.detector.detect(original),
-            "compile_success": validation["compile_success"],
-            "compile_errors": validation["compile_errors"],
-            "validation_status": validation["validation_status"],
-            "risk_score": risk_data["risk_score"],
-            "risk_level": risk_data["risk_level"],
-            "risk_triggers": risk_data["risk_triggers"],
-            "total_diff_changes": total_diff_changes,
-            "confidence_score": confidence_score,
-            "diff_text": diff_data["diff_text"],
-            "test_success": validation["test_success"]
-        }
+    def findings(self, original, upgraded):
+        if self.detector.detect(original) != "Python 2.x":
+            return []
+        remaining = _true_divisions(upgraded)
+        if remaining:
+            return [f"{remaining} '/' kept as true division: Python 2 floored it when both operands were ints"]
+        return []

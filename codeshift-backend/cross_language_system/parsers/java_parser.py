@@ -1,5 +1,8 @@
 import javalang
+
+from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
+from cross_language_system.parsers import lowering
 
 
 # javalang reports operators as Java symbols; the IR uses neutral names so that
@@ -16,29 +19,85 @@ COMPARISON_OPS = {
 
 COMPOUND_OPS = {
     "+=": "Add", "-=": "Sub", "*=": "Mult", "/=": "Div", "%=": "Mod",
+    "&=": "BitAnd", "|=": "BitOr", "^=": "BitXor", "<<=": "LShift", ">>=": "RShift",
 }
+
+PREFIX_OPS = {"-": "USub", "+": "UAdd", "!": "Not", "~": "Invert"}
 
 # Scanner reads map onto the IR's stdin node rather than a generic method call.
 SCANNER_READS = {
     "nextInt": "int",
-    "nextLong": "int",
+    "nextLong": "long",
     "nextDouble": "double",
     "nextFloat": "double",
     "next": "token",
     "nextLine": "String",
 }
 
+# Math.<name> calls every target can express under the same name.
+MATH_FUNCTIONS = {"sqrt", "pow", "abs", "max", "min", "floor", "ceil"}
+
+# Character.<name> tests, under their C names.
+CHARACTER_FUNCTIONS = {
+    "isUpperCase": "isupper", "isLowerCase": "islower", "isDigit": "isdigit",
+    "isLetter": "isalpha", "isWhitespace": "isspace", "isLetterOrDigit": "isalnum",
+    "toUpperCase": "toupper", "toLowerCase": "tolower",
+}
+
+CONSTANTS = {
+    ("Integer", "MAX_VALUE"): 2**31 - 1, ("Integer", "MIN_VALUE"): -2**31,
+    ("Long", "MAX_VALUE"): 2**63 - 1, ("Long", "MIN_VALUE"): -2**63,
+    ("Math", "PI"): 3.141592653589793,
+}
+
+# Java String methods under the (Python) names the generators expect.
+STRING_METHODS = {
+    "toLowerCase": "lower", "toUpperCase": "upper", "trim": "strip",
+    "startsWith": "startswith", "endsWith": "endswith", "indexOf": "find",
+}
+
+PARSE_CALLS = {
+    ("Integer", "parseInt"): "int",
+    ("Integer", "valueOf"): "int",
+    ("Long", "parseLong"): "long",
+    ("Double", "parseDouble"): "float",
+    ("Double", "valueOf"): "float",
+    ("String", "valueOf"): "str",
+    ("Integer", "toString"): "str",
+    ("Double", "toString"): "str",
+    ("Long", "toString"): "str",
+}
+
+ELEMENT_TYPES = {"int": "int", "long": "long", "short": "int", "byte": "int",
+                 "double": "double", "float": "double", "boolean": "boolean",
+                 "char": "char", "String": "String"}
+
+
+def _refuse(node, what):
+    position = getattr(node, "position", None)
+    where = f" (line {position.line})" if position else ""
+    raise UnsupportedConstruct(f"{what}{where}")
+
 
 class JavaParser:
 
+    def __init__(self):
+        self._temp_index = 0
+
     def parse(self, code):
 
-        tree = javalang.parse.parse(code)
+        try:
+            tree = javalang.parse.parse(code)
+        except (javalang.parser.JavaSyntaxError, javalang.tokenizer.LexerError) as exc:
+            raise SyntaxError(f"Java source does not parse: {exc}") from None
+
         body = []
 
         for _, node in tree:
             if isinstance(node, javalang.tree.ClassDeclaration):
                 body.append(self._handle_class(node))
+            elif isinstance(node, (javalang.tree.EnumDeclaration, javalang.tree.InterfaceDeclaration)):
+                _refuse(node, f"{type(node).__name__[:-11].lower()} declarations")
 
         return Program(body)
 
@@ -49,11 +108,14 @@ class JavaParser:
         fields = []
         for member in node.fields:
             declared = self._type_name(member.type)
+            if declared == "Scanner":
+                continue  # stdin plumbing; reads become Input nodes
             for declarator in member.declarators:
+                declared_here = self._with_dimensions(declared, declarator)
                 fields.append(Field(
                     declarator.name,
-                    declared,
-                    self._handle_expression(declarator.initializer)
+                    declared_here,
+                    self._initializer(declarator.initializer, declared_here)
                     if declarator.initializer else None,
                 ))
 
@@ -67,7 +129,9 @@ class JavaParser:
 
         base = node.extends.name if node.extends else None
 
-        return Class(node.name, methods, fields, base)
+        record = Class(node.name, methods, fields, base)
+        lowering.bind_members(record)
+        return record
 
     # ---------------- METHOD ----------------
 
@@ -76,10 +140,7 @@ class JavaParser:
         params = [p.name for p in node.parameters]
         param_types = {p.name: self._type_name(p.type) for p in node.parameters}
 
-        body = []
-        if node.body:
-            for stmt in node.body:
-                self._collect(body, self._handle_statement(stmt))
+        body = self._block(node.body or [])
 
         modifiers = getattr(node, "modifiers", None) or set()
 
@@ -109,12 +170,23 @@ class JavaParser:
                 self._type_name(a.type) if getattr(a, "type", None) else "Object"
                 for a in arguments
             )
-            return f"{name}<{inner}>"
+            name = f"{name}<{inner}>"
 
-        if getattr(type_node, "dimensions", None):
-            return f"List<{name}>"
+        for _ in getattr(type_node, "dimensions", None) or []:
+            name = f"List<{self._boxed(name)}>"
 
         return name
+
+    @staticmethod
+    def _boxed(name):
+        return {"int": "Integer", "long": "Long", "double": "Double", "float": "Double",
+                "boolean": "Boolean", "char": "Character", "short": "Integer",
+                "byte": "Integer"}.get(name, name)
+
+    def _with_dimensions(self, declared, declarator):
+        for _ in getattr(declarator, "dimensions", None) or []:
+            declared = f"List<{self._boxed(declared)}>"
+        return declared
 
     # ---------------- STATEMENTS ----------------
 
@@ -126,13 +198,30 @@ class JavaParser:
         elif parsed is not None:
             target.append(parsed)
 
+    def _block(self, statements):
+        body = []
+        for s in statements:
+            self._collect(body, self._handle_statement(s))
+        return body
+
+    def _body_of(self, stmt):
+        """Statements of a loop or branch body, braced or not."""
+        if stmt is None:
+            return []
+        if isinstance(stmt, javalang.tree.BlockStatement):
+            return self._block(stmt.statements or [])
+        body = []
+        self._collect(body, self._handle_statement(stmt))
+        return body
+
     def _handle_statement(self, stmt):
 
-        # RETURN
-        if isinstance(stmt, javalang.tree.ReturnStatement):
-            return Return(self._handle_expression(stmt.expression))
+        if getattr(stmt, "label", None):
+            _refuse(stmt, "labelled statements")
 
-        # VARIABLE DECLARATION
+        if isinstance(stmt, javalang.tree.ReturnStatement):
+            return Return(self._handle_expression(stmt.expression) if stmt.expression else None)
+
         if isinstance(stmt, javalang.tree.LocalVariableDeclaration):
 
             declared = self._type_name(stmt.type)
@@ -141,343 +230,443 @@ class JavaParser:
             if declared == "Scanner":
                 return None
 
-            declarations = [
-                Variable(
+            declarations = []
+            for d in stmt.declarators:
+                declared_here = self._with_dimensions(declared, d)
+                declarations.append(Variable(
                     d.name,
-                    declared,
-                    self._handle_expression(d.initializer) if d.initializer else None,
-                )
-                for d in stmt.declarators
-            ]
+                    declared_here,
+                    self._initializer(d.initializer, declared_here) if d.initializer else None,
+                ))
 
             return declarations[0] if len(declarations) == 1 else declarations
-        # TRY-CATCH
-        # TRY-CATCH
+
         if isinstance(stmt, javalang.tree.TryStatement):
 
-            try_body = []
-            for inner_stmt in stmt.block:
-                self._collect(try_body, self._handle_statement(inner_stmt))
+            if stmt.resources or stmt.finally_block or len(stmt.catches or []) != 1:
+                _refuse(stmt, "try with resources, finally or several catch clauses")
 
             catch = stmt.catches[0]
-            catch_var = catch.parameter.name
-            exception_type = catch.parameter.types[0]
-
-            catch_body = []
-            for inner_stmt in catch.block:
-                self._collect(catch_body, self._handle_statement(inner_stmt))
-
             return TryCatch(
-                try_body,
-                catch_var,
-                catch_body,
-                exception_type
+                self._block(stmt.block or []),
+                catch.parameter.name,
+                self._block(catch.block or []),
+                catch.parameter.types[0],
             )
-        # IF
+
         if isinstance(stmt, javalang.tree.IfStatement):
+            return IfStatement(
+                self._handle_expression(stmt.condition),
+                self._body_of(stmt.then_statement),
+                self._body_of(stmt.else_statement),
+            )
 
-            condition = self._handle_expression(stmt.condition)
-
-            body = []
-            if stmt.then_statement:
-
-                if isinstance(stmt.then_statement, javalang.tree.BlockStatement):
-                    for s in stmt.then_statement.statements:
-                        self._collect(body, self._handle_statement(s))
-                else:
-                    self._collect(body, self._handle_statement(stmt.then_statement))
-
-            else_body = []
-            if stmt.else_statement:
-
-                if isinstance(stmt.else_statement, javalang.tree.BlockStatement):
-                    for s in stmt.else_statement.statements:
-                        self._collect(else_body, self._handle_statement(s))
-                else:
-                    self._collect(else_body, self._handle_statement(stmt.else_statement))
-
-            return IfStatement(condition, body, else_body)
-
-        # FOR LOOP
         if isinstance(stmt, javalang.tree.ForStatement):
+            return self._handle_for(stmt)
 
-            control = stmt.control
+        if isinstance(stmt, javalang.tree.WhileStatement):
+            return WhileLoop(self._handle_expression(stmt.condition), self._body_of(stmt.body))
 
-            # ---------- Enhanced for ----------
-            if isinstance(control, javalang.tree.EnhancedForControl):
+        if isinstance(stmt, javalang.tree.DoStatement):
+            return lowering.do_while(self._body_of(stmt.body), self._handle_expression(stmt.condition))
 
-                var_name = control.var.declarators[0].name
-                iterable = self._handle_expression(control.iterable)
-
-                body = []
-                if isinstance(stmt.body, javalang.tree.BlockStatement):
-                    for s in stmt.body.statements:
-                        self._collect(body, self._handle_statement(s))
-                else:
-                    self._collect(body, self._handle_statement(stmt.body))
-
-                return ForLoop(var_name, iterable, body)
-
-            # ---------- Traditional for ----------
-            if hasattr(control, "init") and control.init:
-
-                init = control.init
-                if isinstance(init, list):
-                    init = init[0]
-
-                var_decl = init.declarators[0]
-                var_name = var_decl.name
-                start_expr = self._handle_expression(var_decl.initializer)
-
-                end_expr = self._handle_expression(control.condition.operandr)
-
-                iterable = FunctionCall("range", [start_expr, end_expr])
-
-                body = []
-                if isinstance(stmt.body, javalang.tree.BlockStatement):
-                    for s in stmt.body.statements:
-                        self._collect(body, self._handle_statement(s))
-                else:
-                    self._collect(body, self._handle_statement(stmt.body))
-
-                return ForLoop(var_name, iterable, body)
-    
+        if isinstance(stmt, javalang.tree.BlockStatement):
+            return Block(self._block(stmt.statements or []))
 
         if isinstance(stmt, javalang.tree.BreakStatement):
+            if stmt.goto:
+                _refuse(stmt, "labelled break")
             return Break()
 
         if isinstance(stmt, javalang.tree.ContinueStatement):
+            if stmt.goto:
+                _refuse(stmt, "labelled continue")
             return Continue()
-                    
-        # METHOD CALL (like System.out.println)
-                # Assignment
-        # StatementExpression (assignment or method call)
-        if isinstance(stmt, javalang.tree.StatementExpression):
 
-            expr = stmt.expression
-
-            # Assignment: sum = sum + nums.get(i)
-            if isinstance(expr, javalang.tree.Assignment):
-
-                left = expr.expressionl
-                right = self._handle_expression(expr.value)
-                operator = getattr(expr, "type", "=")
-
-                # Handle array index assignment arr[i] = value
-                if isinstance(left, javalang.tree.ArraySelector):
-                    array_name = left.primary.member
-                    index = self._handle_expression(left.index)
-
-                    return MethodCall(
-                        array_name,
-                        "set_index",
-                        [index, right]
-                    )
-
-                target = self._handle_expression(left)
-
-                if operator in COMPOUND_OPS:
-                    return AugAssign(target, COMPOUND_OPS[operator], right)
-
-                # Writing through this/obj mutates existing state rather than
-                # declaring a new local.
-                if isinstance(target, AttributeAccess):
-                    return Assignment(target, right)
-
-                if isinstance(target, Identifier):
-                    return Variable(target.name, "auto", right)
-
-                return Assignment(target, right)
-
-            # Method call: nums.add(5)
-            if isinstance(expr, javalang.tree.MethodInvocation):
-
-                if expr.member in ("println", "print") and expr.qualifier in ("System.out", "System.err"):
-                    return PrintStatement(
-                        [self._handle_expression(a) for a in expr.arguments]
-                    )
-
-                if expr.qualifier:
-                    return MethodCall(
-                        Identifier(expr.qualifier),
-                        expr.member,
-                        [self._handle_expression(a) for a in expr.arguments]
-                    )
-
-                return FunctionCall(
-                    expr.member,
-                    [self._handle_expression(a) for a in expr.arguments]
-                )
-
-            
-        # SWITCH
-        # SWITCH
         if isinstance(stmt, javalang.tree.SwitchStatement):
-
+            self._temp_index += 1
             cases = []
-
             for case in stmt.cases:
-
-                # case value
-                value = None
-                if case.case:
-                    value = self._handle_expression(case.case[0])
-
-                body = []
-
-                for s in case.statements:
-
-                    # Ignore break statements
-                    if isinstance(s, javalang.tree.BreakStatement):
-                        continue
-
-                    self._collect(body, self._handle_statement(s))
-
-                cases.append(SwitchCase(value, body))
-
-            return SwitchStatement(
-                self._handle_expression(stmt.expression),
-                cases
+                statements = self._block(case.statements or [])
+                labels = case.case or [None]
+                # case 1: case 2: arrive here as one SwitchStatementCase.
+                for label in labels[:-1]:
+                    cases.append((None if label == "default" else self._handle_expression(label), []))
+                last = labels[-1]
+                cases.append((None if last in (None, "default") else self._handle_expression(last), statements))
+            return lowering.switch(
+                self._handle_expression(stmt.expression), cases, f"_switch{self._temp_index}"
             )
-        
-        if isinstance(stmt, javalang.tree.WhileStatement):
 
-            condition = self._handle_expression(stmt.condition)
+        if isinstance(stmt, javalang.tree.StatementExpression):
+            return self._handle_statement_expression(stmt.expression)
 
-            body = []
-            if isinstance(stmt.body, javalang.tree.BlockStatement):
-                for s in stmt.body.statements:
-                    self._collect(body, self._handle_statement(s))
+        if isinstance(stmt, javalang.tree.ClassDeclaration):
+            return None  # local classes are collected with the top-level ones
+
+        if type(stmt) is javalang.tree.Statement:
+            return None  # the empty statement ;
+
+        if isinstance(stmt, javalang.tree.AssertStatement):
+            return None
+
+        _refuse(stmt, f"the Java statement '{type(stmt).__name__}' is not supported")
+
+    def _handle_for(self, stmt):
+
+        control = stmt.control
+
+        if isinstance(control, javalang.tree.EnhancedForControl):
+            return ForLoop(
+                control.var.declarators[0].name,
+                self._handle_expression(control.iterable),
+                self._body_of(stmt.body),
+            )
+
+        init = []
+        declared = False
+        if control.init is not None:
+            if isinstance(control.init, javalang.tree.VariableDeclaration):
+                declared = True
+                self._collect(init, self._handle_statement(
+                    javalang.tree.LocalVariableDeclaration(
+                        type=control.init.type, declarators=control.init.declarators,
+                        modifiers=set(), annotations=[],
+                    )
+                ))
             else:
-                self._collect(body, self._handle_statement(stmt.body))
+                for expression in control.init if isinstance(control.init, list) else [control.init]:
+                    self._collect(init, self._handle_statement_expression(expression))
 
-            return WhileLoop(condition, body)
+        update = []
+        for expression in control.update or []:
+            self._collect(update, self._handle_statement_expression(expression))
+
+        condition = self._handle_expression(control.condition) if control.condition is not None else None
+
+        return lowering.counting_loop(init, condition, update, self._body_of(stmt.body), declared)
+
+    def _handle_statement_expression(self, expr):
+
+        # i++, ++i, i--, --i as a statement are all just i += 1 / i -= 1.
+        step = self._increment(expr)
+        if step is not None:
+            return step
+
+        if isinstance(expr, javalang.tree.Assignment):
+
+            target = self._handle_expression(expr.expressionl)
+            right = self._handle_expression(expr.value)
+            operator = expr.type
+
+            if operator in COMPOUND_OPS:
+                return AugAssign(target, COMPOUND_OPS[operator], right)
+            if operator != "=":
+                _refuse(expr, f"the {operator} operator")
+
+            if isinstance(target, Identifier):
+                return Variable(target.name, "auto", right)
+
+            return Assignment(target, right)
+
+        if isinstance(expr, javalang.tree.MethodInvocation):
+
+            if expr.qualifier in ("System.out", "System.err") and not expr.selectors:
+                if expr.qualifier == "System.err":
+                    _refuse(expr, "writing to System.err")
+                return self._print(expr)
+
+            return self._handle_expression(expr)
+
+        if isinstance(expr, (javalang.tree.ClassCreator, javalang.tree.This)):
+            return self._handle_expression(expr)
+
+        _refuse(expr, "this expression statement")
+
+    def _increment(self, expr):
+
+        prefix = [op for op in (getattr(expr, "prefix_operators", None) or []) if op in ("++", "--")]
+        postfix = [op for op in (getattr(expr, "postfix_operators", None) or []) if op in ("++", "--")]
+        operators = prefix + postfix
+
+        if not operators:
+            return None
+        if len(operators) > 1 or len(prefix + postfix) != len(
+            (getattr(expr, "prefix_operators", None) or []) + (getattr(expr, "postfix_operators", None) or [])
+        ):
+            _refuse(expr, "combined increment operators")
+
+        target = self._primary(expr, strip_increments=True)
+        return AugAssign(target, "Add" if operators[0] == "++" else "Sub", Constant(1))
+
+    def _print(self, expr):
+
+        args = [self._handle_expression(a) for a in expr.arguments]
+
+        if expr.member == "println":
+            return PrintStatement(args[:1], end="\n")
+        if expr.member == "print":
+            return PrintStatement(args[:1], end="")
+        if expr.member in ("printf", "format"):
+            if not args or not isinstance(args[0], Constant) or not isinstance(args[0].value, str):
+                _refuse(expr, "printf with a computed format string")
+            fmt = args[0].value.replace("%n", "\n")
+            return PrintStatement([FormatString(fmt, args[1:])], end="")
+
+        _refuse(expr, f"System.out.{expr.member}")
 
     # ---------------- EXPRESSIONS ----------------
+
+    def _initializer(self, initializer, declared):
+        if isinstance(initializer, javalang.tree.ArrayInitializer):
+            return ArrayLiteral([self._initializer(i, declared) for i in initializer.initializers or []])
+        return self._handle_expression(initializer)
 
     def _handle_expression(self, expr):
 
         if expr is None:
             return Constant(None)
 
-        # LITERAL
+        if isinstance(expr, javalang.tree.BinaryOperation):
+            node = self._binary(expr)
+        elif isinstance(expr, javalang.tree.TernaryExpression):
+            node = TernaryOp(
+                self._handle_expression(expr.condition),
+                self._handle_expression(expr.if_true),
+                self._handle_expression(expr.if_false),
+            )
+        elif isinstance(expr, javalang.tree.Cast):
+            node = self._cast(expr)
+        elif isinstance(expr, javalang.tree.ArrayInitializer):
+            node = ArrayLiteral([self._handle_expression(i) for i in expr.initializers or []])
+        elif isinstance(expr, javalang.tree.Assignment):
+            _refuse(expr, "assignment inside an expression")
+        elif isinstance(expr, (javalang.tree.LambdaExpression, javalang.tree.MethodReference)):
+            _refuse(expr, "lambdas and method references")
+        elif isinstance(expr, javalang.tree.Primary):
+            if self._increment_in(expr):
+                _refuse(expr, "++ or -- inside an expression")
+            return self._apply_prefix(expr, self._primary(expr))
+        else:
+            _refuse(expr, f"the Java expression '{type(expr).__name__}' is not supported")
+
+        return self._apply_prefix(expr, node)
+
+    @staticmethod
+    def _increment_in(expr):
+        operators = (getattr(expr, "prefix_operators", None) or []) + (getattr(expr, "postfix_operators", None) or [])
+        return any(op in ("++", "--") for op in operators)
+
+    def _binary(self, expr):
+
+        operator = expr.operator
+        left = self._handle_expression(expr.operandl)
+        right = self._handle_expression(expr.operandr)
+
+        if operator in COMPARISON_OPS:
+            return BooleanOp(left, COMPARISON_OPS[operator], right)
+        if operator in ARITHMETIC_OPS:
+            return BinaryOp(left, ARITHMETIC_OPS[operator], right)
+        if operator == "instanceof":
+            _refuse(expr, "instanceof")
+        _refuse(expr, f"the {operator} operator")
+
+    def _cast(self, expr):
+        target = self._type_name(expr.type)
+        inner = self._handle_expression(expr.expression)
+        mapped = {"int": "int", "long": "long", "short": "int", "byte": "int",
+                  "double": "float", "float": "float", "char": "char", "String": "str"}.get(target)
+        if mapped is None:
+            _refuse(expr, f"cast to {target}")
+        return TypeCast(mapped, inner)
+
+    def _primary(self, expr, strip_increments=False):
+        """Literal, name, call, this or creation, with its selector chain."""
+
         if isinstance(expr, javalang.tree.Literal):
+            node = self._literal(expr)
 
-            value = expr.value
-
-            if value == "true":
-                return Constant(True)
-
-            if value == "false":
-                return Constant(False)
-
-            if value == "null":
-                return Constant(None)
-
-            if value.startswith('"'):
-                return Constant(value.strip('"'))
-
-            if "." in value:
-                return Constant(float(value))
-
-            return Constant(int(value))
-
-        # THIS  (this / this.field / this.method())
-        if isinstance(expr, javalang.tree.This):
-
+        elif isinstance(expr, javalang.tree.This):
             node = SelfRef()
 
-            for selector in (expr.selectors or []):
-                if isinstance(selector, javalang.tree.MemberReference):
-                    node = AttributeAccess(node, selector.member)
-                elif isinstance(selector, javalang.tree.MethodInvocation):
-                    node = MethodCall(
-                        node,
-                        selector.member,
-                        [self._handle_expression(a) for a in selector.arguments],
-                    )
+        elif isinstance(expr, javalang.tree.MemberReference):
+            node = self._member(expr)
 
+        elif isinstance(expr, javalang.tree.MethodInvocation):
+            node = self._invocation(expr)
+
+        elif isinstance(expr, javalang.tree.ArrayCreator):
+            if expr.initializer is not None:
+                node = self._initializer(expr.initializer, None)
+            else:
+                if any(d is None for d in expr.dimensions):
+                    _refuse(expr, "jagged array creation")
+                node = FunctionCall("range_array", [self._handle_expression(d) for d in expr.dimensions])
+                node.element_type = ELEMENT_TYPES.get(getattr(expr.type, "name", "int"), "Object")
+
+        elif isinstance(expr, javalang.tree.ClassCreator):
+            if expr.body:
+                _refuse(expr, "anonymous classes")
+            node = ObjectCreation(
+                expr.type.name,
+                [self._handle_expression(a) for a in expr.arguments or []]
+            )
+
+        else:
+            _refuse(expr, f"the Java expression '{type(expr).__name__}' is not supported")
+
+        for selector in expr.selectors or []:
+            node = self._select(node, selector)
+
+        return node
+
+    def _select(self, node, selector):
+
+        if isinstance(selector, javalang.tree.ArraySelector):
+            return IndexAccess(node, self._handle_expression(selector.index))
+
+        if isinstance(selector, javalang.tree.MemberReference):
+            if selector.member == "length":
+                return MethodCall(node, "size", [])
+            return AttributeAccess(node, selector.member)
+
+        if isinstance(selector, javalang.tree.MethodInvocation):
+            return self._method(node, selector.member, [self._handle_expression(a) for a in selector.arguments or []])
+
+        _refuse(selector, f"the selector '{type(selector).__name__}'")
+
+    @staticmethod
+    def _qualified(qualifier):
+        node = None
+        for part in qualifier.split("."):
+            node = Identifier(part) if node is None else AttributeAccess(node, part)
+        return node
+
+    def _member(self, expr):
+
+        if not expr.qualifier:
+            return Identifier(expr.member)
+
+        # Array length is a field in Java and a size everywhere else.
+        if expr.member == "length":
+            return MethodCall(self._qualified(expr.qualifier), "size", [])
+
+        if (expr.qualifier, expr.member) in CONSTANTS:
+            return Constant(CONSTANTS[(expr.qualifier, expr.member)])
+
+        return AttributeAccess(self._qualified(expr.qualifier), expr.member)
+
+    def _invocation(self, expr):
+
+        args = [self._handle_expression(a) for a in expr.arguments or []]
+        qualifier = expr.qualifier
+
+        if qualifier and expr.member in SCANNER_READS:
+            return Input(None, SCANNER_READS[expr.member])
+
+        if qualifier == "Math" and expr.member in MATH_FUNCTIONS:
+            return FunctionCall(expr.member, args)
+
+        if qualifier == "Character" and expr.member in CHARACTER_FUNCTIONS and len(args) == 1:
+            return FunctionCall(CHARACTER_FUNCTIONS[expr.member], args)
+
+        if qualifier == "Collections" and expr.member in ("min", "max") and len(args) == 1:
+            return FunctionCall(expr.member, args)
+
+        if qualifier == "Collections" and expr.member == "sort" and len(args) == 1:
+            return MethodCall(args[0], "sort", [])
+
+        if (qualifier, expr.member) in PARSE_CALLS and len(args) == 1:
+            return TypeCast(PARSE_CALLS[(qualifier, expr.member)], args[0])
+
+        if qualifier == "String" and expr.member == "format":
+            if not args or not isinstance(args[0], Constant) or not isinstance(args[0].value, str):
+                _refuse(expr, "String.format with a computed format string")
+            return FormatString(args[0].value.replace("%n", "\n"), args[1:])
+
+        if qualifier in ("System.out", "System.err"):
+            _refuse(expr, "printing inside an expression")
+
+        if qualifier:
+            return self._method(self._qualified(qualifier), expr.member, args)
+
+        return FunctionCall(expr.member, args)
+
+    def _method(self, obj, member, args):
+
+        # Java string and list idioms that have a neutral IR form.
+        if member == "equals" and len(args) == 1:
+            return BooleanOp(obj, "Eq", args[0])
+        if member == "length" and not args:
+            return MethodCall(obj, "size", [])
+        if member == "charAt" and len(args) == 1:
+            return IndexAccess(obj, args[0])
+        if member == "contains" and len(args) == 1:
+            return BooleanOp(args[0], "In", obj)
+        if member in STRING_METHODS:
+            return MethodCall(obj, STRING_METHODS[member], args)
+
+        return MethodCall(obj, member, args)
+
+    def _literal(self, expr):
+
+        value = expr.value
+
+        if value == "true":
+            return Constant(True)
+        if value == "false":
+            return Constant(False)
+        if value == "null":
+            return Constant(None)
+        if value.startswith('"'):
+            return Constant(self._unescape(value[1:-1]))
+        if value.startswith("'"):
+            node = Constant(self._unescape(value[1:-1]))
+            node.is_char = True
             return node
 
-        # IDENTIFIER
-        if isinstance(expr, javalang.tree.MemberReference):
+        text = value.replace("_", "")
+        lowered = text.lower()
+        try:
+            if lowered.startswith(("0x", "0b")):
+                return Constant(int(lowered.rstrip("l"), 0))
+            if any(c in lowered for c in ".e") and not lowered.startswith("0x") or lowered.endswith(("f", "d")):
+                return Constant(float(lowered.rstrip("fd")))
+            digits = lowered.rstrip("l")
+            if len(digits) > 1 and digits.startswith("0"):
+                return Constant(int(digits, 8))
+            return Constant(int(digits))
+        except ValueError:
+            _refuse(expr, f"the literal {value}")
 
-            base = (
-                AttributeAccess(Identifier(expr.qualifier), expr.member)
-                if expr.qualifier
-                else Identifier(expr.member)
-            )
-
-            return self._apply_prefix(expr, base)
-
-        # BINARY OP
-        if isinstance(expr, javalang.tree.BinaryOperation):
-
-            operator = expr.operator
-            left = self._handle_expression(expr.operandl)
-            right = self._handle_expression(expr.operandr)
-
-            if operator in COMPARISON_OPS:
-                return BooleanOp(left, COMPARISON_OPS[operator], right)
-
-            return BinaryOp(left, ARITHMETIC_OPS.get(operator, "Add"), right)
-
-        
-
-        # METHOD CALL
-        if isinstance(expr, javalang.tree.MethodInvocation):
-
-            if expr.member in SCANNER_READS:
-                return Input(None, SCANNER_READS[expr.member])
-
-            if expr.member == "equals" and expr.qualifier:
-                return BooleanOp(
-                    Identifier(expr.qualifier),
-                    "Eq",
-                    self._handle_expression(expr.arguments[0])
-                )
-
-            if expr.qualifier:
-                return MethodCall(
-                    Identifier(expr.qualifier),
-                    expr.member,
-                    [self._handle_expression(a) for a in expr.arguments]
-                )
-
-            return FunctionCall(
-                expr.member,
-                [self._handle_expression(a) for a in expr.arguments]
-            )
-        
-        # ARRAY CREATION like new int[n]
-        if isinstance(expr, javalang.tree.ArrayCreator):
-            size = self._handle_expression(expr.dimensions[0])
-            return FunctionCall("range_array", [size])
-
-
-        # Array access arr[i]
-        if isinstance(expr, javalang.tree.ArraySelector):
-            return IndexAccess(
-                Identifier(expr.member),
-                self._handle_expression(expr.index)
-            )
-
-        # OBJECT CREATION
-        if isinstance(expr, javalang.tree.ClassCreator):
-            return ObjectCreation(
-                expr.type.name,
-                [self._handle_expression(a) for a in expr.arguments]
-            )
-
-        return Constant(None)
+    @staticmethod
+    def _unescape(text):
+        out = []
+        index = 0
+        escapes = {"n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f",
+                   "0": "\0", "\\": "\\", "'": "'", '"': '"'}
+        while index < len(text):
+            char = text[index]
+            if char == "\\" and index + 1 < len(text):
+                following = text[index + 1]
+                if following == "u" and index + 5 < len(text):
+                    out.append(chr(int(text[index + 2:index + 6], 16)))
+                    index += 6
+                    continue
+                out.append(escapes.get(following, following))
+                index += 2
+                continue
+            out.append(char)
+            index += 1
+        return "".join(out)
 
     @staticmethod
     def _apply_prefix(expr, node):
         """Wrap a node in whatever prefix operators javalang attached to it."""
 
         for operator in reversed(getattr(expr, "prefix_operators", None) or []):
-            mapped = {"-": "USub", "+": "UAdd", "!": "Not", "~": "Invert"}.get(operator)
-            if mapped:
-                node = UnaryOp(mapped, node)
+            if operator in ("++", "--"):
+                continue  # handled (or refused) by the caller
+            node = UnaryOp(PREFIX_OPS[operator], node)
 
         return node

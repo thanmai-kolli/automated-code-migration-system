@@ -18,8 +18,36 @@ class TryCatch(IRNode):
         self.exception_type = exception_type
     
 class PrintStatement:
-    def __init__(self, args):
+    """Write values to stdout.
+
+    sep and end follow Python's print(). Sources without them map onto the
+    same two knobs: println is end="\\n", print is end="", and a cout chain is
+    sep="" because << inserts nothing between its operands.
+    """
+
+    def __init__(self, args, end="\n", sep=" "):
         self.args = args
+        self.end = end
+        self.sep = sep
+
+
+class FormatString:
+    """printf-style formatting: a C format string applied to values.
+
+    Produced by printf, String.format and Python's "..." % values. The format
+    keeps C syntax; each generator rewrites it into its own dialect.
+    """
+
+    def __init__(self, fmt, args):
+        self.fmt = fmt
+        self.args = args
+
+
+class Block:
+    """A nested scope with no control flow of its own, e.g. a bare { ... }."""
+
+    def __init__(self, body=None):
+        self.body = body or []
 
 class Input:
     """A read from stdin.
