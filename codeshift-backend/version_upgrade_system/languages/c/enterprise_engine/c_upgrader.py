@@ -197,6 +197,39 @@ def _calloc(code):
     return splice(code, edits)
 
 
+def _bsd_strings(code):
+    """bzero/bcopy/index/rindex (BSD <strings.h>, undeclared in C17) -> memset/memmove/strchr/strrchr."""
+    masked = mask(code, LANG)
+    edits = []
+    for match in re.finditer(r"(?<![\w.>])(bzero|bcopy|index|rindex)\s*\(", masked):
+        name = match.group(1)
+        if re.search(rf"\b(int|char|long|size_t|unsigned)\b[^;(]*\b{name}\b\s*[=;,\[]|\b{name}\s*=", masked):
+            continue  # a variable of that name: not the library function
+        if re.search(rf"\b(?:int|char|void|long|unsigned|double|float|static)\b[\w\s*]*\b{name}\s*\([^)]*\)\s*[{{;]", masked):
+            continue  # the program defines or declares its own function of that name
+        close = matching(masked, match.end() - 1)
+        if close == -1:
+            continue
+        args = [a.strip() for a in re.split(r",(?![^()]*\))", code[match.end():close])]
+        if name == "bzero" and len(args) == 2:
+            replacement = f"memset({args[0]}, 0, {args[1]})"
+        elif name == "bcopy" and len(args) == 3:
+            replacement = f"memmove({args[1]}, {args[0]}, {args[2]})"
+        elif name in ("index", "rindex") and len(args) == 2:
+            replacement = f"{'strchr' if name == 'index' else 'strrchr'}({args[0]}, {args[1]})"
+        else:
+            continue
+        edits.append((match.start(), close + 1, replacement))
+    if not edits:
+        return code
+    code = splice(code, edits)
+    if not re.search(r"#\s*include\s*<string\.h>", code):
+        includes = list(re.finditer(r"^[ \t]*#[ \t]*include[^\n]*\n", code, re.MULTILINE))
+        position = includes[-1].end() if includes else 0
+        code = code[:position] + "#include <string.h>\n" + code[position:]
+    return code
+
+
 class CEnterpriseUpgrader(GatedUpgrader):
 
     language = LANG
@@ -219,6 +252,7 @@ class CEnterpriseUpgrader(GatedUpgrader):
             Rule("sprintf -> snprintf (array destinations)", _array_destinations(
                 "sprintf", lambda dest, rest: f"snprintf({dest}, sizeof {dest}, {', '.join(rest)})")),
             Rule("malloc(sizeof) -> calloc (zero-initialised)", _calloc),
+            Rule("bzero/bcopy/index/rindex -> memset/memmove/strchr/strrchr", _bsd_strings),
         ]
 
     def findings(self, original, upgraded):

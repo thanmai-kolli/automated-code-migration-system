@@ -190,8 +190,13 @@ export default function ReportPanel({ report, mode }) {
             <p className="report-description">
               {report.appliedRules.length === 0
                 ? "No legacy construct could be rewritten safely; the code is unchanged."
-                : "Each rule was kept only if the program still compiled (and passed your test cases, if given)."}
+                : "Each rule was kept only if the program still compiled and reproduced the reference outputs."}
             </p>
+            {report.validationBasis && (
+              <p className="report-description">
+                Validated against: <strong>{report.validationBasis}</strong>
+              </p>
+            )}
           </div>
         )}
         {/* Test Execution */}
@@ -231,7 +236,9 @@ export default function ReportPanel({ report, mode }) {
                 )}
 
                 <p className="report-description">
-                  Runs both programs on your inputs and compares their output.
+                  {report.testResults.generated
+                    ? "No test cases were given, so the original program was run on generated inputs and its outputs became the expected results."
+                    : "Runs both programs on your inputs and compares their output."}
                 </p>
               </>
             )}

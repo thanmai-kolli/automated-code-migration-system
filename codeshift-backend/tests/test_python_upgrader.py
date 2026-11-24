@@ -216,3 +216,65 @@ class TestPythonSemantics:
     def test_has_key_keeps_comparison_precedence(self):
         code = self._upgrade("d = {}\nx = d.has_key('a') == False\n")["code"]
         assert "('a' in d) == False" in code
+
+
+class TestPython2LibraryRules:
+    """Library and builtin changes of Python 3, checked by running the upgraded program."""
+
+    SOURCE = (
+        '"""Legacy tool."""\n'
+        "import ConfigParser, sys\n"
+        "import cPickle as pickle\n"
+        "from StringIO import StringIO\n"
+        "from itertools import izip, chain\n"
+        "class Countdown(object):\n"
+        "    def __init__(self, n):\n"
+        "        self.n = n\n"
+        "    def __iter__(self):\n"
+        "        return self\n"
+        "    def next(self):\n"
+        "        if self.n <= 0:\n"
+        "            raise StopIteration\n"
+        "        self.n -= 1\n"
+        "        return self.n\n"
+        "    def __nonzero__(self):\n"
+        "        return self.n > 0\n"
+        "words = ['ccc', 'a', 'bb']\n"
+        "words.sort(cmp=lambda a, b: len(a) - len(b))\n"
+        "total = reduce(lambda x, y: x + y, [1, 2, 3], 10L)\n"
+        "print words, total, sys.maxint > 0, `42`, unichr(65)\n"
+        "for a, b in izip([1, 2], [3, 4]):\n"
+        "    print a + b\n"
+        "c = Countdown(3)\n"
+        "print c.next(), list(c), bool(Countdown(0))\n"
+        "print apply(max, [4, 9, 2]), StringIO('x').read(), pickle.loads(pickle.dumps(5))\n"
+    )
+
+    def test_upgraded_program_runs_like_python2(self):
+        import subprocess
+        import sys
+
+        result = PythonEnterpriseUpgrader().upgrade(self.SOURCE)
+        assert result["rejected_rules"] == []
+        run = subprocess.run([sys.executable, "-c", result["code"]], capture_output=True, text=True)
+        assert run.stderr == ""
+        assert run.stdout.splitlines() == [
+            "['a', 'bb', 'ccc'] 16 True 42 A", "4", "6", "2 [1, 0] False", "9 x 5"]
+
+    def test_renamed_modules_keep_their_old_names(self):
+        code = PythonEnterpriseUpgrader().upgrade(self.SOURCE)["code"]
+        assert "import configparser as ConfigParser, sys" in code
+        assert "from io import StringIO" in code
+        assert "from itertools import chain\nizip = zip" in code
+        assert "from functools import reduce" in code and "import functools" in code
+
+    def test_lambda_with_two_parameters_in_cmp(self):
+        code = PythonEnterpriseUpgrader().upgrade("xs = [2, 1]\nxs.sort(cmp=lambda a, b: a - b, reverse=True)\n")["code"]
+        assert "key=functools.cmp_to_key(lambda a, b: a - b), reverse=True" in code
+
+    def test_own_function_named_like_a_removed_builtin_is_kept(self):
+        source = "def file(name):\n    return name.upper()\nprint file('a')\n"
+        assert "file('a')" in PythonEnterpriseUpgrader().upgrade(source)["code"]
+
+    def test_detector_sees_renamed_modules(self):
+        assert PythonVersionDetector().detect("import urllib2\n") == "Python 2.x"

@@ -12,6 +12,19 @@ CHAR_TESTS = ("isupper", "islower", "isdigit", "isalpha", "isspace", "isalnum")
 # Functions with the same meaning in Python's math, Java's Math and C's math.h.
 MATH_NAMES = ("sqrt", "pow", "floor", "ceil", "log", "log10", "exp", "sin", "cos", "tan", "hypot")
 
+# C and C++ library functions; one that no generator maps is refused rather than emitted.
+C_LIBRARY_CALLS = {
+    "malloc", "calloc", "realloc", "free", "memcpy", "memmove", "memset", "memcmp", "memchr",
+    "strcpy", "strncpy", "strcat", "strncat", "strcmp", "strncmp", "strchr", "strrchr", "strstr",
+    "strtok", "strspn", "strcspn", "strpbrk", "strdup", "strlen", "sprintf", "snprintf", "sscanf",
+    "strtol", "strtoul", "strtoll", "strtod", "atoi", "atol", "atoll", "atof", "fopen", "fclose",
+    "fprintf", "fscanf", "fgets", "fputs", "fputc", "fgetc", "fread", "fwrite", "fflush", "getc",
+    "putc", "ungetc", "perror", "gets", "qsort", "bsearch", "rand", "srand", "system", "getenv",
+    "atexit", "abort", "time", "clock", "difftime", "localtime", "strftime", "asin", "acos", "atan",
+    "atan2", "log2", "cbrt", "trunc", "lround", "fmax", "fmin", "fmod", "setjmp", "longjmp", "signal",
+    "labs", "llabs", "fabs",
+}
+
 ROUNDING = {
     "round_even": "int",       # Python round(x): ties to even, integral result
     "round_digits": "double",  # Python round(x, n): exact binary value rounded half-even

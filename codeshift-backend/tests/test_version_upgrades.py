@@ -208,3 +208,138 @@ class TestCppUpgrade:
         code = ("int main()\n{\n    int i = 0;\n    for (;;) { if (++i > 3) break; }\n"
                 "    return i == 4 ? 0 : 1;\n}\n")
         assert "for (;;)" in upgrade(code, "cpp")["code"]
+
+    def test_features_removed_in_cpp17(self):
+        code = (
+            "#include <iostream>\n#include <vector>\n#include <algorithm>\n#include <functional>\n"
+            "using namespace std;\n"
+            "struct IsBig : public std::unary_function<int, bool> {\n"
+            "    bool operator()(int x) const { return x > 10; }\n};\n"
+            "int check(int v) throw(std::bad_alloc) {\n"
+            "    if (v < 0) throw (std::bad_alloc());\n    return v * 2;\n}\n"
+            "int main() {\n    std::vector<int> v;\n    v.push_back(5); v.push_back(20); v.push_back(30);\n"
+            "    int big = std::count_if(v.begin(), v.end(), std::bind2nd(std::greater<int>(), 10));\n"
+            "    int small = std::count_if(v.begin(), v.end(), std::not1(std::bind1st(std::less<int>(), 10)));\n"
+            "    cout << big << ' ' << small << ' ' << std::count_if(v.begin(), v.end(), IsBig()) << ' ' << check(4);\n"
+            "    return 0;\n}\n"
+        )
+        result = upgrade(code, "cpp")
+        upgraded = result["code"]
+        assert result["compile_success"] is True and result["rejected_rules"] == []
+        assert "std::bind(std::greater<int>(), std::placeholders::_1, 10)" in upgraded
+        assert "std::not_fn(std::bind(std::less<int>(), 10, std::placeholders::_1))" in upgraded
+        assert "struct IsBig {" in upgraded
+        assert "int check(int v) {" in upgraded
+        assert "throw (std::bad_alloc());" in upgraded  # a throw statement, not a specification
+
+    def test_pre_standard_headers_and_void_main(self):
+        code = "#include <iostream.h>\nvoid main()\n{\n    cout << 42 << endl;\n}\n"
+        result = upgrade(code, "cpp")
+        assert result["compile_success"] is True
+        assert "#include <iostream>\nusing namespace std;" in result["code"]
+        assert "int main()" in result["code"]
+
+
+@needs_javac
+class TestModernJava:
+
+    LEGACY = (
+        "import java.util.*;\nimport java.io.*;\n\n"
+        "public class Legacy {\n"
+        "    static String describe(Object o) {\n"
+        "        if (o instanceof String) {\n"
+        "            String s = (String) o;\n"
+        "            return \"text:\" + s.length();\n"
+        "        }\n"
+        "        return \"other\";\n"
+        "    }\n\n"
+        "    public static void main(String[] args) throws IOException {\n"
+        "        List<String> names = new ArrayList<String>();\n"
+        "        names.add(\"ada\");\n"
+        "        List raw = new ArrayList();\n"
+        "        raw.add(\"linus\");\n"
+        "        Iterator it = names.iterator();\n"
+        "        while (it.hasNext()) {\n"
+        "            String name = (String) it.next();\n"
+        "            System.out.println(name.length());\n"
+        "        }\n"
+        "        Iterator r = raw.iterator();\n"
+        "        while (r.hasNext()) {\n"
+        "            String name = (String) r.next();\n"
+        "            System.out.println(name);\n"
+        "        }\n"
+        "        StringWriter sink = new StringWriter();\n"
+        "        PrintWriter out = new PrintWriter(sink);\n"
+        "        try {\n"
+        "            out.print(describe(\"hey\"));\n"
+        "        } finally {\n"
+        "            out.close();\n"
+        "        }\n"
+        "        System.out.println(sink + \" \" + describe(3));\n"
+        "    }\n"
+        "}\n"
+    )
+
+    def test_java_7_to_16_idioms(self):
+        result = upgrade(self.LEGACY, "java")
+        code = result["code"]
+        assert result["compile_success"] is True and result["rejected_rules"] == []
+        assert "new ArrayList<>()" in code
+        assert "if (o instanceof String s) {" in code and "(String) o" not in code
+        assert "for (String name : names) {" in code
+        assert "for (Object _element : raw) {" in code  # a raw list still needs its cast
+        assert "try (PrintWriter out = new PrintWriter(sink)) {" in code and "finally" not in code
+
+    def test_finally_with_more_than_close_is_kept(self):
+        code = self.LEGACY.replace("out.close();", "out.close();\n            System.out.println(1);")
+        assert "finally" in upgrade(code, "java")["code"]
+
+
+@needs_gcc
+class TestBsdStrings:
+
+    def test_bzero_bcopy_and_index(self):
+        code = ("#include <stdio.h>\n#include <strings.h>\nint main(void) {\n"
+                "    char buf[16]; char out[16];\n    bzero(buf, sizeof buf);\n"
+                "    buf[0] = 'h'; buf[1] = 'i';\n    bcopy(buf, out, sizeof buf);\n"
+                "    printf(\"%s %s\\n\", out, index(out, 'i'));\n    return 0;\n}\n")
+        upgraded = upgrade(code, "c")["code"]
+        assert "memset(buf, 0, sizeof buf)" in upgraded
+        assert "memmove(out, buf, sizeof buf)" in upgraded
+        assert "strchr(out, 'i')" in upgraded
+        assert "#include <string.h>" in upgraded
+
+    def test_variable_named_index_is_not_touched(self):
+        code = ("#include <stdio.h>\nint index(int x) { return x; }\nint main(void) {\n"
+                "    int index = 3;\n    printf(\"%d\\n\", index);\n    return 0;\n}\n")
+        assert "strchr" not in upgrade(code, "c")["code"]
+
+
+@needs_gcc
+class TestCharacterizationTests:
+    """Without user tests the original's own outputs on generated inputs gate every rule."""
+
+    class Harmful(GatedUpgrader):
+        language = "c"
+        engine = "test"
+        detector = PythonVersionDetector()
+
+        def rules(self, code):
+            return [Rule("changes output", lambda c: c.replace("n * 2", "n * 3"))]
+
+    SOURCE = ("#include <stdio.h>\nint main(void) {\n    int n;\n"
+              "    if (scanf(\"%d\", &n) != 1) return 0;\n    printf(\"%d\\n\", n * 2);\n    return 0;\n}\n")
+
+    def test_generated_tests_reject_a_rule_that_changes_output(self, monkeypatch):
+        monkeypatch.setenv(ENABLE_FLAG, "1")
+        result = self.Harmful().upgrade(self.SOURCE)
+        assert result["rejected_rules"] == ["changes output (changed program output)"]
+        assert result["test_results"]["generated"] is True
+        assert result["test_results"]["passed"] == result["test_results"]["total"] > 1
+        assert "generated characterization" in result["validation_basis"]
+
+    def test_disabled_execution_falls_back_to_compilation(self, monkeypatch):
+        monkeypatch.delenv(ENABLE_FLAG, raising=False)
+        result = self.Harmful().upgrade(self.SOURCE)
+        assert result["applied_rules"] == ["changes output"]
+        assert result["validation_basis"] == "compilation only"

@@ -26,6 +26,39 @@ COMPILERS = {"c": "gcc", "cpp": "g++"}
 COMPILE_TIMEOUT = 20
 JAVA_CLASS = re.compile(r"public\s+(?:final\s+|abstract\s+)?class\s+(\w+)")
 
+# Generic inputs for a golden-master run: small integers read as ints, floats and words alike.
+CHARACTERIZATION_INPUTS = (
+    "\n".join(["3"] * 40),
+    "\n".join(["10"] * 40),
+    "\n".join(["4", "1", "7", "2", "9", "5", "8", "3", "6", "12"] * 4),
+    "\n".join(["1 2 3 4 5"] * 20),
+)
+READS_INPUT = {
+    "python": r"\b(raw_)?input\s*\(|\bsys\.stdin\b",
+    "java": r"\bScanner\b|\bSystem\.in\b|\bBufferedReader\b",
+    "c": r"\b(scanf|getchar|fgets|gets|getline|fgetc|getc)\s*\(",
+    "cpp": r"\bcin\b|\b(scanf|getchar|fgets|gets|getline)\s*\(",
+}
+_PYTHON2 = []
+
+
+def python2():
+    """Command that runs a Python 2 interpreter, or None; the original of a 2-to-3 upgrade needs one."""
+    if not _PYTHON2:
+        command = None
+        for candidate in (["python2"], ["python2.7"], ["py", "-2"]):
+            if shutil.which(candidate[0]):
+                try:
+                    probe = subprocess.run(candidate + ["-c", "import sys; print(sys.version_info[0])"],
+                                           capture_output=True, text=True, timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+                if probe.stdout.strip() == "2":
+                    command = candidate
+                    break
+        _PYTHON2.append(command)
+    return _PYTHON2[0]
+
 
 def normalize_language(language):
     language = (language or "").lower()
@@ -77,6 +110,10 @@ class Build:
             raise RuntimeError(diagnostics.strip() or "compilation failed")
 
     def _compile(self):
+        if self.language == "python" and self.std == "python2":
+            self._write("program.py")
+            return python2() + ["program.py"]
+
         if self.language == "python":
             try:
                 compile(self.code, "program.py", "exec")
@@ -142,11 +179,45 @@ def compile_check(language, code):
 
 def _legacy_build(language, original):
     """Build the original under the oldest standard that accepts it."""
+    if language == "python" and python2():
+        return Build(language, original, "python2").__enter__()
     for std in (LEGACY_STD.get(language), TARGET_STD.get(language), None):
         build = Build(language, original, std).__enter__()
         if build.compiled or language not in COMPILERS or std is None:
             return build
         build.__exit__()
+
+
+def characterization(language, original):
+    """Golden-master cases for a program the user gave no tests for.
+
+    The original runs on generic inputs; each input on which it terminates and
+    prints the same output twice becomes a case whose reference is that output.
+    A Python 2 original needs a Python 2 interpreter: Python 3 would record
+    different semantics (true division) as the expected behaviour.
+    """
+    language = normalize_language(language)
+    if not execution_enabled() or language not in READS_INPUT or (language == "python" and not python2()):
+        return [], None
+    from version_upgrade_system.core.textscan import mask
+    inputs = CHARACTERIZATION_INPUTS if re.search(READS_INPUT[language], mask(original, language)) else ("",)
+    cases, references = [], []
+    legacy = _legacy_build(language, original)
+    try:
+        if not legacy.compiled:
+            return [], None
+        for stdin_text in inputs:
+            first, error = legacy.run(stdin_text)
+            if error is not None:
+                continue
+            second, error = legacy.run(stdin_text)
+            if error is not None or _normalize(first) != _normalize(second):
+                continue
+            cases.append((stdin_text, None))
+            references.append((stdin_text, first, "original program", None))
+    finally:
+        legacy.__exit__()
+    return (cases, references) if cases else ([], None)
 
 
 def reference_outputs(language, original, raw_cases):

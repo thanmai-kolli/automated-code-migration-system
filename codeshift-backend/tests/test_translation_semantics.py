@@ -777,6 +777,83 @@ class TestExternalIdioms:
 
 
 # ---------------------------------------------------------------------------
+# Silent defects found on the second external benchmark
+# ---------------------------------------------------------------------------
+
+C_GLOBALS = """#include <stdio.h>
+int counter = 0;
+int i;
+int table[5];
+const char *NAMES[] = {"a", "b"};
+void bump(void) { counter += 2; }
+void fill(void) { for (i = 0; i < 5; i++) table[i] = i * i; }
+int shadow(void) { int counter = 40; counter += 2; return counter; }
+int main(int argc, char **argv) {
+    bump(); bump(); fill();
+    printf("%d %s %d %d %d\\n", counter, NAMES[1], table[4], i, shadow());
+    return 0;
+}
+"""
+
+PY_RECURRENCES = """def changes(amount, coins):
+    ways = [0] * (amount + 1)
+    ways[0] = 1
+    for coin in coins:
+        for j in range(coin, amount + 1):
+            ways[j] += ways[j - coin]
+    return ways[amount]
+
+def fib(n):
+    a, b = 0, 1
+    for _ in range(n):
+        a, b = b, a + b
+    return a
+
+def pascal(n):
+    row = [1]
+    for _ in range(n):
+        nxt = [1]
+        for k in range(len(row) - 1):
+            nxt.append(row[k] + row[k + 1])
+        nxt.append(1)
+        row = nxt
+    return row
+
+print(changes(100000, [1, 5, 10, 25, 50, 100]))
+print(fib(90), max(pascal(60)), sum(pascal(40)))
+"""
+
+
+class TestSilentDefects:
+
+    @pytest.mark.parametrize("target", directions("c", ["python", "java"]))
+    def test_c_globals_and_main_with_unused_arguments(self, target):
+        behaves_the_same(C_GLOBALS, "c", target)
+
+    @pytest.mark.parametrize("target", directions("python", ["java", "c++"]))
+    def test_additive_recurrences_get_64_bits(self, target):
+        behaves_the_same(PY_RECURRENCES, "python", target)
+
+    def test_main_that_reads_its_arguments_is_refused(self):
+        result = ENGINE.convert('#include <stdio.h>\nint main(int argc, char **argv) '
+                                '{ printf("%d\\n", argc); return 0; }\n', "c", "java")
+        assert "command-line arguments" in result["error"]
+
+    @pytest.mark.parametrize("target", ["python", "java"])
+    def test_unmapped_c_library_call_is_refused(self, target):
+        code = ('#include <stdlib.h>\n#include <string.h>\nint main(void) '
+                '{ char *s = malloc(4); strcpy(s, "ab"); free(s); return 0; }\n')
+        result = ENGINE.convert(code, "c", target)
+        assert "C library function malloc()" in result["error"]
+
+    @pytest.mark.parametrize("target", directions("c", ["python", "java"]))
+    def test_c_math_functions_are_mapped(self, target):
+        code = ('#include <stdio.h>\n#include <math.h>\nint main(void) '
+                '{ printf("%.4f %.4f %.1f\\n", sin(0.5), log(2.0), fabs(-2.5)); return 0; }\n')
+        behaves_the_same(code, "c", target)
+
+
+# ---------------------------------------------------------------------------
 # Refusals: what cannot be translated faithfully must say so
 # ---------------------------------------------------------------------------
 

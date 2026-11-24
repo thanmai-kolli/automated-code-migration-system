@@ -16,6 +16,7 @@ function normalizeReport(data) {
     riskTriggers: data.risk_triggers ?? [],
     appliedRules: data.applied_rules ?? [],
     rejectedRules: data.rejected_rules ?? [],
+    validationBasis: data.validation_basis ?? null,
 
     confidence: data.confidence ?? null,
 

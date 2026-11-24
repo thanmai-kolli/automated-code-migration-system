@@ -178,6 +178,113 @@ def _vector_to_list(code, name):
     return _ensure_imports(upgraded, ["List", "ArrayList"] + (["Collections"] if needs_collections else []))
 
 
+def _diamond(code):
+    """List<String> xs = new ArrayList<String>();  ->  new ArrayList<>()  (Java 7)."""
+    masked = mask(code, LANG)
+    edits = []
+    for match in re.finditer(r"\b[\w.]+\s*<[^;=(){}]*>\s+\w+\s*=\s*new\s+[\w.]+\s*(<[^;=(){}]+>)\s*\(", masked):
+        if match.group(1).replace(" ", "") != "<>":
+            edits.append((match.start(1), match.end(1), "<>"))
+    return splice(code, edits)
+
+
+def _try_with_resources(code):
+    """X r = new X(..); try { .. } finally { r.close(); }  ->  try (X r = new X(..)) { .. }  (Java 7).
+
+    Only without catch clauses: there a catch would run before the resource is closed.
+    """
+    masked = mask(code, LANG)
+    pattern = (r"(?m)^([ \t]*)((?:final\s+)?[\w.<>\[\], ]+?\s+(\w+)\s*=\s*new\s+[\w.<>]+\s*\()")
+    for declaration in re.finditer(pattern, masked):
+        name = declaration.group(3)
+        open_paren = declaration.end() - 1
+        close_paren = matching(masked, open_paren)
+        if close_paren == -1:
+            continue
+        semicolon = re.match(r"\s*;", masked[close_paren + 1:])
+        if not semicolon:
+            continue
+        after = close_paren + 1 + semicolon.end()
+        try_match = re.match(r"\s*try\s*\{", masked[after:])
+        if not try_match:
+            continue
+        body_open = after + try_match.end() - 1
+        body_close = matching(masked, body_open)
+        if body_close == -1:
+            continue
+        finally_match = re.match(r"\s*finally\s*\{", masked[body_close + 1:])
+        if not finally_match:
+            continue
+        finally_open = body_close + 1 + finally_match.end() - 1
+        finally_close = matching(masked, finally_open)
+        if finally_close == -1:
+            continue
+        cleanup = masked[finally_open + 1:finally_close].strip()
+        close_call = rf"{name}\s*\.\s*close\s*\(\s*\)\s*;"
+        if not re.fullmatch(rf"(if\s*\(\s*{name}\s*!=\s*null\s*\)\s*)?(\{{\s*)?{close_call}(\s*\}})?", cleanup):
+            continue
+        resource = code[declaration.start(2):close_paren + 1].strip()
+        indent = declaration.group(1)
+        body = code[body_open:body_close + 1]
+        return code[:declaration.start()] + f"{indent}try ({resource}) {body}" + code[finally_close + 1:]
+    return code
+
+
+def _iterator_loops(code):
+    """Iterator it = xs.iterator(); while (it.hasNext()) { T x = (T) it.next(); .. }  ->  for-each (Java 5)."""
+    masked = mask(code, LANG)
+    pattern = (r"(?m)^([ \t]*)Iterator\s*(<[^;=]*>)?\s+(\w+)\s*=\s*(\w+(?:\.\w+)*)\s*\.\s*iterator\s*\(\s*\)\s*;"
+               r"\s*while\s*\(\s*\3\s*\.\s*hasNext\s*\(\s*\)\s*\)\s*\{")
+    for match in re.finditer(pattern, masked):
+        iterator, collection = match.group(3), match.group(4)
+        body_open = match.end() - 1
+        body_close = matching(masked, body_open)
+        if body_close == -1:
+            continue
+        first = re.match(rf"\s*([\w.<>\[\]]+)\s+(\w+)\s*=\s*(\(\s*([\w.<>\[\]]+)\s*\)\s*)?{iterator}\s*\.\s*next\s*\(\s*\)\s*;",
+                         masked[body_open + 1:])
+        if not first:
+            continue
+        rest = masked[body_open + 1 + first.end():]
+        if re.search(rf"(?<![\w.]){iterator}\b", rest):
+            continue  # it.remove() or later uses need the explicit iterator
+        element_type, variable = first.group(1), first.group(2)
+        statement_end = body_open + 1 + first.end()
+        declared = re.search(rf"\b[\w.]+\s*<\s*([\w.]+)\s*>\s+{re.escape(collection)}\s*[=;,)]", masked)
+        if first.group(3) and not (declared and declared.group(1) == first.group(4) == element_type):
+            # A raw collection yields Objects: keep the cast the original applied.
+            header = f"for (Object _element : {collection}) {{\n{match.group(1)}    {element_type} {variable} = ({first.group(4)}) _element;"
+        else:
+            header = f"for ({element_type} {variable} : {collection}) {{"
+        return code[:match.start()] + match.group(1) + header + code[statement_end:]
+    return code
+
+
+def _instanceof_patterns(code):
+    """if (o instanceof T) { T t = (T) o; ..  ->  if (o instanceof T t) { ..  (Java 16)."""
+    masked = mask(code, LANG)
+    edits = []
+    pattern = (r"\(\s*(\w+)\s+instanceof\s+([\w.]+)\s*\)\s*\{(\s*)(?:final\s+)?\2\s+(\w+)\s*=\s*"
+               r"\(\s*\2\s*\)\s*\1\s*;[ \t]*\n?")
+    for match in re.finditer(pattern, masked):
+        separator = "\n" if "\n" in match.group(3) else " "
+        edits.append((match.start(), match.end(),
+                      f"({match.group(1)} instanceof {match.group(2)} {match.group(4)}) {{{separator}"))
+    return splice(code, edits)
+
+
+def _until_stable(rewrite):
+    """Apply a one-occurrence rewrite until nothing changes."""
+    def apply(code):
+        for _ in range(50):
+            rewritten = rewrite(code)
+            if rewritten == code:
+                break
+            code = rewritten
+        return code
+    return apply
+
+
 class JavaEnterpriseUpgrader(GatedUpgrader):
 
     language = LANG
@@ -187,7 +294,11 @@ class JavaEnterpriseUpgrader(GatedUpgrader):
     def rules(self, code):
         masked = mask(code, LANG)
         rules = [Rule("new Integer(x) etc. -> Integer.valueOf(x) (deprecated for removal)", _boxing),
-                 Rule("StringBuffer -> StringBuilder (no concurrency in file)", _string_buffer)]
+                 Rule("StringBuffer -> StringBuilder (no concurrency in file)", _string_buffer),
+                 Rule("generic instantiation -> diamond <>", _diamond),
+                 Rule("close() in finally -> try-with-resources", _until_stable(_try_with_resources)),
+                 Rule("Iterator while-loop -> enhanced for", _until_stable(_iterator_loops)),
+                 Rule("instanceof and cast -> pattern matching", _instanceof_patterns)]
         lambdas = len(re.findall(rf"\bnew\s+({'|'.join(FUNCTIONAL)})\s*(<[^>(){{}}]*>)?\s*\(\s*\)\s*\{{", masked))
         # Rewrite from the last occurrence back so earlier indices stay valid.
         for index in reversed(range(lambdas)):

@@ -74,6 +74,9 @@ class GatedUpgrader:
     def upgrade(self, code, test_cases=None):
         original = code
         cases, references = toolchain.reference_outputs(self.language, original, test_cases)
+        generated = not cases
+        if generated:
+            cases, references = toolchain.characterization(self.language, original)
 
         current = original
         state = self._validate(current, references)
@@ -113,6 +116,11 @@ class GatedUpgrader:
             triggers.append(f"{test_results['failed']} of {test_results['total']} test cases failed")
 
         diff_text, changes = diff(original, current, self.language)
+        if references:
+            basis = (f"{len(references)} generated characterization test(s): outputs of the original program"
+                     if generated else f"{len(references)} test case(s)")
+        else:
+            basis = "compilation only"
         result = {
             "code": current,
             "engine": self.engine,
@@ -129,8 +137,10 @@ class GatedUpgrader:
             "risk_level": risk_level(state.compiled, tests_failed, triggers),
             "total_diff_changes": changes,
             "diff_text": diff_text,
+            "validation_basis": basis,
         }
         if test_results is not None:
+            test_results["generated"] = generated
             result["test_results"] = test_results
             if test_results.get("enabled"):
                 result["test_success"] = not tests_failed

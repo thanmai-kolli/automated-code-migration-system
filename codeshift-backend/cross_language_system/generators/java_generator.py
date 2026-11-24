@@ -119,6 +119,11 @@ class JavaGenerator:
         self.current_class = None
         self.class_names = {n.name for n in program.body if isinstance(n, Class)}
         self.user_functions = library.user_functions(program)
+        c_main = self.source_lang in ("c", "c++") and any(
+            isinstance(n, Function) and n.name == "main" and not n.params for n in program.body)
+        self.c_globals = {java_name(n.name): self._java_type(n.var_type) for n in program.body
+                          if c_main and isinstance(n, Variable) and not isinstance(n.value, DictLiteral)}
+        self.in_c_function = False
 
         members = ""
         function_names = []
@@ -140,11 +145,12 @@ class JavaGenerator:
         main = "    public static void main(String[] args) {\n"
 
         if not main_statements and function_names:
-            # Only a zero-argument function can be invoked without inventing values.
-            for node in program.body:
-                if isinstance(node, Function) and len(node.params) == 0:
-                    main += f"        {node.name}();\n"
-                    break
+            # Only a zero-argument function can be invoked without inventing values;
+            # a C program's own main comes first.
+            callable_now = [n for n in program.body if isinstance(n, Function) and len(n.params) == 0]
+            entry = next((n for n in callable_now if n.name == "main"), callable_now[0] if callable_now else None)
+            if entry is not None:
+                main += f"        {entry.name}();\n"
 
         self.symbol_table = SymbolTable()
         fields = ""
@@ -153,8 +159,17 @@ class JavaGenerator:
                 java_type = self._java_type(variable.var_type)
                 fields += f"    static {java_type} {name};\n"
                 self.symbol_table.register_variable(name, java_type)
+        c_main = self.source_lang in ("c", "c++") and any(
+            isinstance(n, Function) and n.name == "main" and not n.params for n in program.body)
+        if c_main:
+            # C globals: static fields, initialised in order before main() runs.
+            for name, java_type in self.c_globals.items():
+                fields += f"    static {java_type} {name};\n"
+                self.symbol_table.register_variable(name, java_type)
         for stmt in main_statements:
             main += self._generate_statement(stmt, indent=2)
+        if c_main and main_statements:
+            main += "        main();\n"
 
         main += "    }\n"
 
@@ -228,6 +243,10 @@ class JavaGenerator:
 
         tab = "    " * indent
         self.symbol_table = SymbolTable()
+        for name, global_type in self.c_globals.items():
+            self.symbol_table.register_variable(name, global_type)
+        self.shadowed = set()
+        previous_in_c_function, self.in_c_function = self.in_c_function, bool(self.c_globals)
 
         params = []
         for p in func.params:
@@ -252,6 +271,7 @@ class JavaGenerator:
 
         for stmt in func.body:
             code += self._generate_statement(stmt, indent + 1)
+        self.in_c_function = previous_in_c_function
 
         if func.name == "main" and self.source_lang in ("c", "c++") and self._java_type(func.return_type) == "int" \
                 and not (func.body and isinstance(func.body[-1], Return)):
@@ -358,6 +378,8 @@ class JavaGenerator:
             value = self._generate_expr(stmt.value)
             if self._c_truth_into_int(stmt.value, self._type(stmt.target)):
                 value = f"({value} ? 1 : 0)"
+            if isinstance(stmt.target, IndexAccess):
+                value = self._into_long(stmt.value, value, self._type(stmt.target))
             return f"{tab}{self._store(stmt.target, value)};\n"
 
         if isinstance(stmt, AugAssign):
@@ -412,7 +434,8 @@ class JavaGenerator:
             return self._for_loop(stmt, indent)
 
         if isinstance(stmt, DictPut):
-            return f"{tab}{self._store(IndexAccess(stmt.dictionary, stmt.key), self._generate_expr(stmt.value))};\n"
+            value = self._into_long(stmt.value, self._generate_expr(stmt.value), self._element_of(stmt.dictionary))
+            return f"{tab}{self._store(IndexAccess(stmt.dictionary, stmt.key), value)};\n"
 
         if isinstance(stmt, PrintStatement):
             return f"{tab}{self._print(stmt)}\n"
@@ -426,7 +449,7 @@ class JavaGenerator:
             if self._type(stmt.list_obj) == "String":
                 # C++'s s.push_back(c) on a string.
                 return f"{tab}{self._generate_expr(stmt.list_obj)} += {self._generate_expr(stmt.value)};\n"
-            return f"{tab}{self._receiver(stmt.list_obj)}.add({self._generate_expr(stmt.value)});\n"
+            return f"{tab}{self._receiver(stmt.list_obj)}.add({self._into_long(stmt.value, self._generate_expr(stmt.value), self._element_of(stmt.list_obj))});\n"
 
         raise UnsupportedConstruct(f"statement {type(stmt).__name__} cannot be written as Java")
 
@@ -454,6 +477,11 @@ class JavaGenerator:
         java_type = self._java_type(stmt.var_type)
         name = java_name(stmt.name)
         existing_type = self.symbol_table.lookup(name)
+        if (existing_type and self.in_c_function and name in self.c_globals and name not in self.shadowed
+                and not getattr(stmt, "assigns", False)):
+            # A local declaration in C shadows the global of the same name.
+            self.shadowed.add(name)
+            existing_type = None
 
         if stmt.value is None:
             if existing_type:
@@ -468,6 +496,18 @@ class JavaGenerator:
 
         self.symbol_table.register_variable(name, java_type)
         return f"{tab}{java_type} {name} = {value};\n"
+
+    def _into_long(self, node, code, slot_type):
+        """An int stored into a Long list element must already be a long: Java boxes, it does not widen."""
+        if slot_type in ("long", "Long") and self._type(node) in ("int", "char"):
+            if isinstance(node, Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+                return f"{code}L"
+            return f"(long) {prec.unary_operand(code, node, LANG)}"
+        return code
+
+    def _element_of(self, list_node):
+        list_type = self._type(list_node) or ""
+        return list_type[5:-1] if list_type.startswith("List<") else None
 
     def _value_for(self, value, java_type):
         """value rendered for a slot of java_type (char literals, list builders)."""
@@ -848,6 +888,12 @@ class JavaGenerator:
         if expr.name in ("sqrt", "pow", "abs", "max", "min") or expr.name in library.MATH_NAMES:
             return f"Math.{expr.name}({args})"
 
+        if expr.name in ("fabs", "labs", "llabs") and len(expr.args) == 1:
+            return f"Math.abs({args})"
+
+        if expr.name == "exit" and self.source_lang in ("c", "c++"):
+            return f"System.exit({args})"
+
         library_call = self._library_call(expr)
         if library_call is not None:
             return library_call
@@ -871,6 +917,9 @@ class JavaGenerator:
             if getattr(expr, "fill", None) is not None:
                 default = self._generate_expr(expr.fill)
             return f"new ArrayList<>(Collections.nCopies({args}, {default}))"
+
+        if self.source_lang in ("c", "c++") and expr.name in library.C_LIBRARY_CALLS:
+            raise UnsupportedConstruct(f"the C library function {expr.name}() has no Java mapping")
 
         return f"{expr.name}({args})"
 
@@ -1011,6 +1060,8 @@ class JavaGenerator:
                 return "new ArrayList<>()"
 
             kinds = {self._type(e) for e in expr.elements}
+            if getattr(expr, "element_type", None) == "long" and kinds <= {"int", "long"}:
+                kinds.add("long")
             widest = next((k for k in ("double", "long") if k in kinds and kinds <= {"int", "long", "double"}), None)
             if widest:
                 # Arrays.asList(1, 2L) has no single element type; widen as Python's numbers would.

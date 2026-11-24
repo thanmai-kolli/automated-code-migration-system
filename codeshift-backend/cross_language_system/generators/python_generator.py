@@ -151,6 +151,27 @@ CHARACTER_METHODS = {"isupper": "isupper", "islower": "islower", "isdigit": "isd
                      "toupper": "upper", "tolower": "lower"}
 
 
+def _assigned_names(statements):
+    names = set()
+    for node in naming.walk(statements):
+        if isinstance(node, (Assignment, AugAssign)) and isinstance(node.target, Identifier):
+            names.add(node.target.name)
+        elif isinstance(node, Variable) and getattr(node, "assigns", False):
+            names.add(node.name)
+        elif isinstance(node, ForLoop) and isinstance(node.iterator, str):
+            names.add(node.iterator)
+    return names
+
+
+def _declared_names(statements):
+    return {n.name for n in naming.walk(statements) if isinstance(n, Variable) and not getattr(n, "assigns", False)}
+
+
+# C zero-initialises globals that have no initialiser.
+C_ZERO = {"int": 0, "long": 0, "short": 0, "double": 0.0, "float": 0.0, "boolean": False,
+          "char": "\x00", "String": None}
+
+
 class PythonGenerator:
 
     def __init__(self, source_lang, target_lang):
@@ -173,6 +194,7 @@ class PythonGenerator:
         self.in_static = True
         self.class_names = {n.name for n in program.body if isinstance(n, Class)}
         self.user_functions = library.user_functions(program)
+        self.c_globals = {n.name for n in program.body if isinstance(n, Variable)}
 
         blocks = []
         main_statements = []
@@ -197,7 +219,14 @@ class PythonGenerator:
         code = "\n".join(b for b in blocks if b.strip())
 
         if main_statements:
+            if self.source_lang in ("c", "c++"):
+                for stmt in main_statements:
+                    if isinstance(stmt, Variable) and stmt.value is None and str(stmt.var_type) in C_ZERO:
+                        stmt.value = Constant(C_ZERO[str(stmt.var_type)])
             body = "".join(self._generate_statement(s, 1) for s in main_statements)
+            if entry_function is not None and self.source_lang in ("c", "c++"):
+                # C globals are initialised first, then main runs.
+                body += f"    main({', '.join('None' for _ in entry_function.params)})\n"
             code += "\n\nif __name__ == '__main__':\n" + (body or "    pass\n")
 
         elif entry_function is not None:
@@ -297,6 +326,12 @@ class PythonGenerator:
         self.in_static = not owner or (func.is_static and not func.is_constructor)
         body = "".join(self._generate_statement(s, indent + 1) for s in func.body)
         self.in_static = previous_static
+
+        if not owner and self.source_lang in ("c", "c++"):
+            written = _assigned_names(func.body) & getattr(self, "c_globals", set())
+            written -= set(func.params) | _declared_names(func.body)
+            if written:
+                body = f"{tab}    global {', '.join(sorted(written))}\n" + body
 
         if not body.strip():
             body = f"{tab}    pass\n"
@@ -620,6 +655,10 @@ class PythonGenerator:
                         return f"{self.current_class.name}.{name}({args})"
                     return f"self.{name}({args})"
 
+        if self.source_lang in ("c", "c++") and name in library.C_LIBRARY_CALLS \
+                and not library.is_user_call(expr, getattr(self, "user_functions", ())):
+            raise UnsupportedConstruct(f"the C library function {name}() has no Python mapping")
+
         return f"{name}({args})"
 
     def _mapped_call(self, expr, args):
@@ -627,9 +666,12 @@ class PythonGenerator:
 
         name = expr.name
 
-        if name in ("sqrt", "pow"):
+        if name in ("sqrt", "pow") or (name in library.MATH_NAMES and name not in ("floor", "ceil")):
             self.uses_math = True
             return f"math.{name}({args})"
+
+        if name in ("fabs", "labs", "llabs") and len(expr.args) == 1:
+            return f"abs({'float(' + args + ')' if name == 'fabs' else args})"
 
         library_call = self._library_call(expr)
         if library_call is not None:

@@ -138,6 +138,85 @@ def _unique_ptrs(code):
     return code
 
 
+PRE_STANDARD_HEADERS = ("iostream", "fstream", "iomanip", "strstream")
+
+
+def _standard_headers(code):
+    """<iostream.h> (pre-1998) -> <iostream> plus using namespace std."""
+    pattern = rf"#\s*include\s*<({'|'.join(PRE_STANDARD_HEADERS)})\.h>"
+    if not re.search(pattern, code):
+        return code
+    code = re.sub(pattern, r"#include <\1>", code)
+    if re.search(r"\busing\s+namespace\s+std\s*;", mask(code, LANG)):
+        return code
+    includes = list(re.finditer(r"^\s*#\s*include[^\n]*\n", code, re.MULTILINE))
+    position = includes[-1].end() if includes else 0
+    return code[:position] + "using namespace std;\n" + code[position:]
+
+
+def _binders(code):
+    """bind1st/bind2nd (removed in C++17) -> std::bind with a placeholder."""
+    masked = mask(code, LANG)
+    edits = []
+    for match in re.finditer(r"(?<![\w:])(?:std::)?bind(1st|2nd)\s*\(", masked):
+        close = matching(masked, match.end() - 1)
+        if close == -1:
+            continue
+        depth, split = 0, -1
+        for k in range(match.end(), close):
+            depth += masked[k] in "(<[{"
+            depth -= masked[k] in ")>]}"
+            if masked[k] == "," and depth == 0:
+                split = k
+                break
+        if split == -1:
+            continue
+        function, value = code[match.end():split].strip(), code[split + 1:close].strip()
+        placeholder = "std::placeholders::_1"
+        arguments = f"{value}, {placeholder}" if match.group(1) == "1st" else f"{placeholder}, {value}"
+        edits.append((match.start(), close + 1, f"std::bind({function}, {arguments})"))
+    return add_include(splice(code, edits), "functional") if edits else code
+
+
+def _random_shuffle(code):
+    """random_shuffle(first, last) (removed in C++17) -> shuffle with a seeded engine."""
+    masked = mask(code, LANG)
+    edits = []
+    for match in re.finditer(r"(?<![\w:])(?:std::)?random_shuffle\s*\(", masked):
+        close = matching(masked, match.end() - 1)
+        if close == -1 or masked[match.end():close].count(",") != 1:
+            continue  # a third argument is a custom generator
+        edits.append((match.start(), close + 1,
+                      f"std::shuffle({code[match.end():close].strip()}, std::mt19937{{std::random_device{{}}()}})"))
+    return add_include(add_include(splice(code, edits), "random"), "algorithm") if edits else code
+
+
+def _base_function_classes(code):
+    """struct F : std::unary_function<A, R> (removed in C++17): the base only supplied typedefs."""
+    return _replace(r"\s*:\s*(?:public\s+)?(?:std::)?(?:unary|binary)_function\s*<[^<>{;]*>(?=\s*\{)", "")(code)
+
+
+def _dynamic_specs(code):
+    """void f() throw(std::bad_alloc)  ->  void f()  (dynamic specifications are an error in C++17)."""
+    masked = mask(code, LANG)
+    edits = []
+    for match in re.finditer(r"\)\s*throw\s*\(\s*[\w:<>, ]*\w[\w:<>, ]*\)(?=\s*(?:[{;=]|const\b|override\b))", masked):
+        depth, open_index = 0, -1
+        for k in range(match.start(), -1, -1):
+            if masked[k] == ")":
+                depth += 1
+            elif masked[k] == "(":
+                depth -= 1
+                if depth == 0:
+                    open_index = k
+                    break
+        before = re.search(r"([A-Za-z_]\w*)\s*$", masked[:open_index]) if open_index > 0 else None
+        if not before or before.group(1) in ("if", "while", "for", "switch", "return", "catch", "sizeof"):
+            continue  # `if (x) throw (e);` is a throw statement, not a specification
+        edits.append((match.start() + 1, match.end(), ""))
+    return splice(code, edits)
+
+
 class CppEnterpriseUpgrader(GatedUpgrader):
 
     language = LANG
@@ -147,6 +226,11 @@ class CppEnterpriseUpgrader(GatedUpgrader):
     def rules(self, code):
         masked = mask(code, LANG)
         rules = [
+            # Rewrites that make legacy code compile again come first, so later rules are
+            # validated against a program that compiles.
+            Rule("<iostream.h> -> <iostream> (pre-standard headers)", _standard_headers),
+            Rule("void main -> int main", _replace(r"\bvoid\s+main\s*\(", "int main(")),
+            Rule("dynamic exception specification throw(X) removed", _dynamic_specs),
             Rule("NULL -> nullptr", _replace(r"\bNULL\b", "nullptr")),
             Rule("std::auto_ptr -> std::unique_ptr", _replace(r"\b(std::)?auto_ptr\b", r"std::unique_ptr")),
             Rule("register storage class removed", _replace(r"\bregister\s+(?=\w)", "")),
@@ -156,6 +240,14 @@ class CppEnterpriseUpgrader(GatedUpgrader):
             Rule("insert(make_pair(k, v)) -> emplace(k, v)",
                  _replace(r"\.insert\s*\(\s*(?:std::)?make_pair\s*\(([^()]*?),([^()]*?)\)\s*\)", r".emplace(\1,\2)")),
             Rule("throw() -> noexcept", _replace(r"\bthrow\s*\(\s*\)", "noexcept")),
+            # not_fn accepts any callable, so the adaptors go before the binders they wrap.
+            Rule("ptr_fun(f) -> f", _replace(r"(?<![\w:])(?:std::)?ptr_fun\s*\(\s*([\w:]+)\s*\)", r"\1")),
+            Rule("not1/not2 -> std::not_fn", _replace(r"(?<![\w:])(?:std::)?not[12]\s*\(", "std::not_fn(")),
+            Rule("mem_fun/mem_fun_ref -> std::mem_fn", _replace(r"(?<![\w:])(?:std::)?mem_fun(?:_ref)?\s*\(", "std::mem_fn(")),
+            Rule("bind1st/bind2nd -> std::bind", _binders),
+            Rule("unary_function/binary_function base removed", _base_function_classes),
+            Rule("random_shuffle -> std::shuffle", _random_shuffle,
+                 caution="random_shuffle -> shuffle: a different random sequence"),
         ]
         loops = len(re.findall(r"\bfor\s*\(\s*(?:std::)?(?:size_t|unsigned(?:\s+int)?|int|long)\s+\w+\s*=\s*0\s*;", masked))
         for index in range(loops):

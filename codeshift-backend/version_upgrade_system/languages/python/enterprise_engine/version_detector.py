@@ -13,6 +13,12 @@ class PythonVersionDetector:
         r'\bunicode\s*\(',
         r'^\s*exec\s+[^(]',
         r'<>',
+        r'^\s*(import|from)\s+(ConfigParser|Queue|cPickle|urllib2|urlparse|StringIO|cStringIO|httplib|Tkinter)\b',
+        r'\bsys\.maxint\b',
+        r'\.has_key\s*\(',
+        r'\bunichr\s*\(',
+        r'(?<![\w.])\d+[lL]\b',
+        r'\bitertools\.i(zip|map|filter)\b',
     ]
 
     # Ordered newest first so the first hit wins.

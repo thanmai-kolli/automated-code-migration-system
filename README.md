@@ -139,11 +139,31 @@ Cases split on `---`, input and expected output on `===`. The `===` half is opti
 without it the migration is compared against the original program, catching regressions
 with nothing written by hand.
 
+**No test cases? Characterization tests.** Legacy code rarely comes with tests, so for a
+version upgrade without `test_cases` the engine writes its own: it builds the original
+with its legacy standard (`gnu89`, `gnu++98`, JDK 17; Python 2 needs a `python2`
+interpreter), runs it on generated inputs — or once, if it reads no input — and keeps
+every input on which it terminates and prints the same output twice. Those outputs then
+gate every rule, exactly like user tests. The report's `validation_basis` says what a
+result was checked against: `compilation only`, your test cases, or the generated tests.
+
 ![Test execution summary](docs/screenshots/10-test-execution.png)
 
 > **This executes submitted code.** It is off unless `CODESHIFT_ENABLE_TEST_EXECUTION=1`.
 > Runs are capped at 5 s and 20 cases in a throwaway directory with a minimal
 > environment — but that is **not** a sandbox. Local use only.
+
+### Version-upgrade rules
+
+Each rule is applied on its own and kept only if the program still compiles and
+reproduces the reference outputs; rejected rules are listed in the report.
+
+| Upgrade | Rewrites |
+| --- | --- |
+| Python 2 → 3 | `print`/`exec` statements, `except X, e`, `raise E, msg`, `<>`, backticks, `xrange`, `raw_input`, `iteritems`/`viewitems`, `has_key`, `basestring`/`unicode`/`long`/`unichr`, octal and `10L` literals, renamed modules (`ConfigParser`, `Queue`, `cPickle`, `urllib2`, `StringIO`, ...), `itertools.izip`, `sys.maxint`, `string.letters`, `os.getcwdu`, `file()`, `intern()`, `execfile()`, `apply()`, `sort(cmp=...)`, `reduce`, `__nonzero__`, iterator `next()`, stored dict views → `list()`, integer `/` → `//` where both operands are provably ints |
+| Java ≤ 1.4 → 17 | boxing constructors → `valueOf`, `StringBuffer` → `StringBuilder`, anonymous functional classes → lambdas, local `Vector` → `List`, diamond `<>`, `close()` in `finally` → try-with-resources, `Iterator` loops → for-each, `instanceof` + cast → pattern matching |
+| C89 → C17 | K&R definitions, implicit `int`, `void main`, missing prototypes, `f()` → `f(void)`, `gets`/`strcpy`/`strcat`/`sprintf` → bounded forms (array destinations), `malloc(sizeof)` → `calloc`, `bzero`/`bcopy`/`index`/`rindex` → `memset`/`memmove`/`strchr`/`strrchr` |
+| C++98 → C++20 | `<iostream.h>` headers, `void main`, dynamic exception specifications, `NULL` → `nullptr`, `auto_ptr`, `register`, `typedef` → `using`, C casts → `static_cast`, iterator declarations → `auto`, `insert(make_pair)` → `emplace`, `throw()` → `noexcept`, `ptr_fun`/`not1`/`mem_fun`/`bind1st`/`bind2nd` → their C++11/17 replacements, `unary_function` bases, `random_shuffle` → `shuffle`, index loops → range-for, local owning `new` → `make_unique` |
 
 ---
 
@@ -215,7 +235,7 @@ test cases) instead of the predicted one, next to the model's confidence.
 ## Tests
 
 ```bash
-cd codeshift-backend  && pip install pytest && python -m pytest -q   # 258 tests
+cd codeshift-backend  && pip install pytest && python -m pytest -q   # 280 tests
 cd codeshift-frontend && npm run lint && npm run build
 ```
 
@@ -257,6 +277,9 @@ On 194 programs written by independent authors for [Rosetta Code](https://rosett
 (582 translations, collected only after this version was frozen), 17.7% were translated
 correctly, 60.5% were refused with an explanation and 0.7% (4) were silently wrong. On an
 earlier set of 108 such programs, whose failures guided this version, 47.8% were correct.
+The defects behind those four silent failures have since been fixed: the current engine
+translates 18.6% of the 582 correctly and none silently wrong, with no regression on any
+other benchmark (those programs are no longer unseen, so this is not a new held-out result).
 Many of the newer tasks exist to demonstrate lambdas, closures and generators. The main gaps:
 
 - **C as a target** has no growable list or string type: list growth, string building,
@@ -273,16 +296,18 @@ Many of the newer tasks exist to demonstrate lambdas, closures and generators. T
   conditional expression), slicing with a step other than -1, keyword arguments, and
   iterating a dictionary or set into C++ (`std::map` and `std::set` are ordered by key,
   Python's by insertion or hash).
-- **Unmapped library calls** produce code that does not compile, or for Python targets
-  fails when it runs; Java method overloading is not resolved for Python targets, and
-  Python's `None` used as a missing integer is not modelled.
+- **Unmapped library calls** in Java or C++ output do not compile; C library calls with
+  no mapping (`malloc`, `strcpy`, `qsort`, `rand`, ...) are refused for Python and Java
+  targets. Java method overloading is not resolved for Python targets, and Python's
+  `None` used as a missing integer is not modelled.
 - **Numeric formats:** C/C++ `unsigned` arithmetic wraps around, Python's and Java's
-  integers do not; Python integers that grow by repeated addition stay 32-bit in Java and
-  C++; Java's scientific notation for doubles of 10^7 and more (`1.0E7`) is reproduced
-  in Python targets only.
-- **Known silent defects:** a C `main(int argc, char **argv)` is not the entry point of
-  the Java translation, and C++ programs with global arrays lose the call of `main` in
-  their Python translation.
+  integers do not; Python integers become 64-bit where they grow through products,
+  powers or additive recurrences (`a, b = b, a + b`, `ways[j] += ways[j - c]`) but
+  overflow beyond 64 bits; Java's scientific notation for doubles of 10^7 and more
+  (`1.0E7`) is reproduced in Python targets only.
+- **C entry points and globals:** `main(argc, argv)` is translated when it ignores its
+  arguments and refused when it reads them; C globals become module variables (with
+  `global` declarations) in Python and static fields in Java.
 - Where a Python type cannot be inferred, Java falls back to `Object`; each such decision
   is reported in the semantic findings.
 - Single-file programs that use standard input and output only: no multi-file projects,

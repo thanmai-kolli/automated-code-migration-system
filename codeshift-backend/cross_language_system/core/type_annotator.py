@@ -18,7 +18,7 @@ semantics) or FloorDiv/FloorMod (Python semantics), so generators never have
 to guess.
 """
 
-from cross_language_system.core import library
+from cross_language_system.core import library, naming
 from cross_language_system.core.ir_nodes import *
 
 NUMERIC = ("int", "long", "double")
@@ -44,6 +44,70 @@ def _unify_element(a, b):
     if {a, b} <= {"Integer", "Double"}:
         return "Double"
     return "Object"
+
+
+def _root_name(expr):
+    while isinstance(expr, IndexAccess):
+        expr = expr.obj
+    return expr.name if isinstance(expr, Identifier) else None
+
+
+def _terms(expr):
+    """The variables (or lists, for elements) summed by an expression of + and -."""
+    if isinstance(expr, BinaryOp) and expr.operator in ("Add", "Sub"):
+        return _terms(expr.left) + _terms(expr.right)
+    name = _root_name(expr)
+    return [name] if name else []
+
+
+def _additive(expr):
+    return (isinstance(expr, BinaryOp) and expr.operator in ("Add", "Sub")) or _root_name(expr) is not None
+
+
+def _reach(start, edges):
+    seen, stack = set(), [start]
+    while stack:
+        for nxt in edges.get(stack.pop(), ()):
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return seen
+
+
+def growing_names(program):
+    """Names whose values can grow exponentially by addition inside a loop.
+
+    Python integers never overflow, so x += x, a, b = b, a + b and
+    ways[j] += ways[j - c] need 64 bits although no product appears: a value
+    is updated from at least two values of its own dependency cycle.
+    """
+    grow = set()
+    for loop in naming.walk(program):
+        if not isinstance(loop, (ForLoop, WhileLoop)):
+            continue
+        updates = []
+        for node in naming.walk(loop.body):
+            if isinstance(node, AugAssign) and node.operator in ("Add", "Sub"):
+                target = _root_name(node.target)
+                if target:
+                    updates.append((target, [target] + _terms(node.value)))
+            elif isinstance(node, (Variable, Assignment)) and node.value is not None and _additive(node.value):
+                target = node.name if isinstance(node, Variable) else _root_name(node.target)
+                if target:
+                    updates.append((target, _terms(node.value)))
+            elif isinstance(node, ListAppend) and _additive(node.value):
+                target = _root_name(node.list_obj)
+                if target:
+                    updates.append((target, _terms(node.value)))
+        edges = {}
+        for target, terms in updates:
+            for term in terms:
+                edges.setdefault(term, set()).add(target)
+        for target, terms in updates:
+            cycle = {name for name in _reach(target, edges) if target in _reach(name, edges)}
+            if sum(1 for term in terms if term in cycle) >= 2:
+                grow |= cycle
+    return grow
 
 
 def widen(a, b):
@@ -102,6 +166,7 @@ class TypeAnnotator:
         self.method_returns = {}  # (class, method) -> return type
         self.call_sites = {}     # name or (class, method) -> list of argument-type tuples
         self.current_class = None
+        self.growing = set()
         # Whether / and % follow C (truncating) or Python (flooring) rules.
         self.c_semantics = (source or "python").lower() in C_SEMANTICS
 
@@ -117,6 +182,7 @@ class TypeAnnotator:
         # only fills what is missing.
         self.declared_params = {}
         self.declared_returns = {}
+        self.growing = set() if self.c_semantics else growing_names(program)
 
         for node in program.body:
             if isinstance(node, Class):
@@ -463,7 +529,12 @@ class TypeAnnotator:
     def _visit_statement(self, stmt, scope):
 
         if isinstance(stmt, Variable):
-            inferred = self._widened(stmt.value, self.infer(stmt.value, scope))
+            if stmt.name in self.growing and isinstance(stmt.value, FunctionCall) \
+                    and stmt.value.name == "range_array" and getattr(stmt.value, "element_type", "int") == "int":
+                stmt.value.element_type = "long"
+            if stmt.name in self.growing and isinstance(stmt.value, ArrayLiteral):
+                stmt.value.element_type = "long"
+            inferred = self._grown(stmt.name, self._widened(stmt.value, self.infer(stmt.value, scope)))
             declared = stmt.var_type and stmt.var_type not in ("auto", UNKNOWN)
             existing = scope.get(stmt.name)
             if self.c_semantics and declared:
@@ -506,6 +577,7 @@ class TypeAnnotator:
                                        self._infer(BinaryOp(stmt.target, stmt.operator, stmt.value), scope))
             if isinstance(stmt.target, Identifier):
                 current = scope.get(stmt.target.name)
+                value_type = self._grown(stmt.target.name, value_type)
                 # x /= 2 on an int stays an int in C and Java.
                 if not (self.c_semantics and current in INTEGRAL):
                     scope.set(stmt.target.name, widen(current, value_type))
@@ -796,6 +868,11 @@ class TypeAnnotator:
     # ------------------------------------------------------------
     # HELPERS
     # ------------------------------------------------------------
+
+    def _grown(self, name, inferred):
+        if name not in self.growing:
+            return inferred
+        return {"int": "long", "List<Integer>": "List<Long>"}.get(inferred, inferred)
 
     def _widened(self, value, inferred):
         """A Python int that can grow past 32 bits needs a 64-bit slot.

@@ -20,6 +20,13 @@ from cross_language_system.core.printf_format import tokens as format_tokens, va
 from cross_language_system.parsers import lowering
 
 
+def _assignment(name, value):
+    # C never declares by assigning; generators read this flag to keep x = v an assignment.
+    node = Variable(name, "auto", value)
+    node.assigns = True
+    return node
+
+
 QUALIFIERS = {"const", "static", "inline", "extern", "register", "volatile", "constexpr", "mutable"}
 
 PRIMITIVE_WORDS = {"void", "int", "long", "short", "char", "float", "double", "bool",
@@ -471,6 +478,13 @@ class CLikeParser:
         self.stream = {"fixed": False, "precision": None, "left": False}
         body = self._parse_block()
 
+        if name == "main" and owner is None and params:
+            used = {n.name for n in naming.walk(body) if isinstance(n, Identifier)}
+            if used & set(params):
+                raise UnsupportedConstruct("command-line arguments (argc and argv)")
+            # Unused argc/argv: the target's own entry point can call main().
+            params, param_types = [], {}
+
         return Function(
             name,
             params,
@@ -859,7 +873,7 @@ class CLikeParser:
     @staticmethod
     def _assign(target, value):
         if isinstance(target, Identifier):
-            return Variable(target.name, "auto", value)
+            return _assignment(target.name, value)
         return Assignment(target, value)
 
     def _parse_declarators(self, declared):
@@ -1280,7 +1294,7 @@ class CLikeParser:
             if self.value() in ("=",) or self.value() in COMPOUND_NAMES:
                 raise UnsupportedConstruct("chained assignment")
             if isinstance(left, Identifier):
-                return Variable(left.name, "auto", right)
+                return _assignment(left.name, right)
             return Assignment(left, right)
 
         if self.value() in COMPOUND_NAMES:

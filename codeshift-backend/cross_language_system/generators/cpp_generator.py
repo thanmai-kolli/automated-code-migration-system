@@ -332,8 +332,7 @@ class CppGenerator(CFamilyGenerator):
         elif kind.startswith(("Set<", "Map<")):
             test = f"{prec.postfix_operand(container, node.right, LANG)}.count({needle}) > 0"
         elif kind.startswith("List<"):
-            receiver = prec.postfix_operand(container, node.right, LANG)
-            test = f"find({receiver}.begin(), {receiver}.end(), {needle}) != {receiver}.end()"
+            test = self._once(node.right, lambda c: f"find({c}.begin(), {c}.end(), {needle}) != {c}.end()")
         else:
             raise UnsupportedConstruct("the in operator on a value of unknown type")
 
@@ -351,12 +350,18 @@ class CppGenerator(CFamilyGenerator):
                 return f"vector<{element}>({self.expr(node.args[0])}, {self.expr(fill)})"
             return f"vector<{element}>({self.expr(node.args[0])})"
         if node.name in ("min", "max", "sum") and len(node.args) == 1:
-            container = prec.postfix_operand(self.expr(node.args[0]), node.args[0], LANG)
             if node.name == "sum":
-                zero = "0.0" if self._type(node) == "double" else "0"
-                return f"accumulate({container}.begin(), {container}.end(), {zero})"
-            return f"*{node.name}_element({container}.begin(), {container}.end())"
+                zero = {"double": "0.0", "long": "0LL"}.get(self._type(node), "0")
+                return self._once(node.args[0], lambda c: f"accumulate({c}.begin(), {c}.end(), {zero})")
+            return self._once(node.args[0], lambda c: f"*{node.name}_element({c}.begin(), {c}.end())")
         return super().call(node)
+
+    def _once(self, container, body):
+        """body(c) over a container expression that must be evaluated exactly once."""
+        code = self.expr(container)
+        if isinstance(container, (Identifier, AttributeAccess)):
+            return body(prec.postfix_operand(code, container, LANG))
+        return f"[&](const auto& _c) {{ return {body('_c')}; }}({code})"
 
     # ---- output ----
 
