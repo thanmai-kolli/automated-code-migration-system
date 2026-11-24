@@ -432,6 +432,108 @@ class TestInputObjectsAndStrings:
 
 
 # ---------------------------------------------------------------------------
+# Library idioms with one defined meaning (core/library.py)
+# ---------------------------------------------------------------------------
+
+PY_LIBRARY = """text = input()
+nums = list(map(int, input().split()))
+upper = 0
+for ch in text:
+    if ch.isupper():
+        upper += 1
+print(upper, text.isdigit())
+print(text[::-1], text[1:3], text[-2:])
+print(round(2.5), round(3.5), round(84.666, 1))
+print("-".join(text.split()))
+for i, x in enumerate(nums):
+    print(i, x)
+print(sorted(nums), 2 ** 40)
+"""
+
+JAVA_LIBRARY = """import java.util.*;
+
+public class Main {
+    public static void main(String[] args) {
+        Scanner sc = new Scanner(System.in);
+        String s = sc.nextLine();
+        StringBuilder sb = new StringBuilder();
+        for (int i = s.length() - 1; i >= 0; i--) {
+            sb.append(s.charAt(i));
+        }
+        System.out.println(sb.toString() + " " + new StringBuilder(s).reverse().toString().equals(sb.toString()));
+        System.out.println(Math.round(2.5) + " " + Math.round(-2.5) + " " + Math.floorMod(-7, 3));
+        List<Integer> xs = new ArrayList<>(Arrays.asList(3, 1, 2));
+        Collections.reverse(xs);
+        System.out.println(xs);
+        String[] words = s.split(" ");
+        System.out.println(words.length + " " + s.isEmpty());
+    }
+}
+"""
+
+CPP_LIBRARY = """#include <iostream>
+#include <iomanip>
+#include <string>
+#include <vector>
+#include <algorithm>
+using namespace std;
+
+int main() {
+    string s;
+    getline(cin, s);
+    string r(s.rbegin(), s.rend());
+    cout << r << " " << (s == r) << endl;
+    cout << to_string(7) + "!" << " " << to_string(2.5) << endl;
+    cout << s.substr(1, 2) << " " << s.back() << " " << s.empty() << endl;
+    vector<int> v = {3, 1, 3};
+    reverse(v.begin(), v.end());
+    cout << v[0] << " " << count(v.begin(), v.end(), 3) << endl;
+    cout << fixed << setprecision(2) << 84.666 << " " << setw(5) << 42 << "|" << endl;
+    return 0;
+}
+"""
+
+C_STRUCT_ARRAYS = """#include <stdio.h>
+
+struct Student {
+    char name[32];
+    int marks[3];
+};
+
+int main(void) {
+    struct Student s;
+    int i, total = 0;
+    scanf("%31s", s.name);
+    for (i = 0; i < 3; i++) {
+        scanf("%d", &s.marks[i]);
+        total += s.marks[i];
+    }
+    printf("%s %d\\n", s.name, total);
+    return 0;
+}
+"""
+
+
+class TestLibraryIdioms:
+
+    @pytest.mark.parametrize("target", directions("python", ["java", "c++"]))
+    def test_python_library(self, target):
+        behaves_the_same(PY_LIBRARY, "python", target, "Hello World 42\n3 1 2\n")
+
+    @pytest.mark.parametrize("target", directions("java", ["python", "c++"]))
+    def test_java_library(self, target):
+        behaves_the_same(JAVA_LIBRARY, "java", target, "ab cd\n", "\n")
+
+    @pytest.mark.parametrize("target", directions("c++", ["python", "java"]))
+    def test_cpp_library(self, target):
+        behaves_the_same(CPP_LIBRARY, "c++", target, "level\n")
+
+    @pytest.mark.parametrize("target", directions("c", ["python", "java"]))
+    def test_c_struct_with_array_members(self, target):
+        behaves_the_same(C_STRUCT_ARRAYS, "c", target, "Asha 91 85 78\n")
+
+
+# ---------------------------------------------------------------------------
 # Refusals: what cannot be translated faithfully must say so
 # ---------------------------------------------------------------------------
 
@@ -439,7 +541,8 @@ class TestFailsLoudly:
 
     @pytest.mark.parametrize("code,source,target", [
         ("xs = []\nxs.append(1)\nprint(xs[0])\n", "python", "c"),
-        ("s = 'hello'\nprint(s[1:3])\n", "python", "java"),
+        ("s = 'hello'\nprint(s[::2])\n", "python", "java"),
+        ("d = {'b': 1, 'a': 2}\nfor k in d:\n    print(k)\n", "python", "c++"),
         ("print(sorted([3, 1], reverse=True))\n", "python", "java"),
         ("import sys\nprint('x', file=sys.stderr)\n", "python", "java"),
         ("for i in range(3):\n    pass\nelse:\n    print('done')\n", "python", "java"),

@@ -1,5 +1,6 @@
 import re
 
+from cross_language_system.core import library
 from cross_language_system.core import precedence as prec
 from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
@@ -108,9 +109,9 @@ class CppGenerator(CFamilyGenerator):
             code += "#include <cstdlib>\n"
         if re.search(r"\b(strchr|memcpy|strlen)\(", text):
             code += "#include <cstring>\n"
-        if re.search(r"\b(pow|sqrt|floor|ceil|fmod|isnan|isinf)\(", text):
+        if re.search(r"\b(pow|sqrt|floor|ceil|fmod|isnan|isinf|nearbyint|round|log|log10|exp|sin|cos|tan|hypot)\(", text):
             code += "#include <cmath>\n"
-        if re.search(r"\b(max|min|find|sort|max_element|min_element)\(", text):
+        if re.search(r"\b(max|min|find|sort|max_element|min_element|reverse|count)\(", text):
             code += "#include <algorithm>\n"
         if "accumulate(" in text:
             code += "#include <numeric>\n"
@@ -133,6 +134,9 @@ class CppGenerator(CFamilyGenerator):
             code += INPUT_HELPER
         for name, helper in STRING_HELPERS.items():
             if f"string_{name}" in self.helpers:
+                code += helper
+        for name, helper in library.CPP_HELPERS.items():
+            if f"lib_{name}" in self.helpers:
                 code += helper
         return code
 
@@ -161,6 +165,9 @@ class CppGenerator(CFamilyGenerator):
             self.helpers.add("split")
             return f"_split({self.expr(node.obj)})"
 
+        if node.method == "split" and len(node.args) == 1:
+            return self._split_on(node)
+
         if node.method in STRING_HELPERS and not node.args:
             self.helpers.add(f"string_{node.method}")
             return f"_{node.method}({self.expr(node.obj)})"
@@ -184,6 +191,23 @@ class CppGenerator(CFamilyGenerator):
             return f"({receiver}.rfind({self.expr(node.args[0])}, 0) == 0)"
 
         return super().method_call(node)
+
+    def _split_on(self, node):
+        """s.split(sep) with the source language's meaning."""
+
+        text, separator = self.expr(node.obj), self.expr(node.args[0])
+        self.helpers.add("lib_split_on")
+        if self.source != "java":
+            return f"_split_on({text}, {separator})"
+        pattern = node.args[0].value if isinstance(node.args[0], Constant) else None
+        if not isinstance(pattern, str):
+            raise UnsupportedConstruct("String.split with a computed pattern")
+        self.helpers.add("lib_java_split")
+        if pattern == r"\s+":
+            return f"_java_split_ws({text})"
+        if re.search(r"[\\^$.|?*+()\[\]{}]", pattern):
+            raise UnsupportedConstruct(f"String.split with the regular expression {pattern!r}")
+        return f"_java_split({text}, {separator})"
 
     # ---- input ----
 
@@ -224,6 +248,12 @@ class CppGenerator(CFamilyGenerator):
 
         if kind == "String":
             return code
+        if kind and kind.startswith("List<") and self.source == "python":
+            self.helpers.update(("lib_repr", "fmt_double"))
+            return f"_py_repr({code})"
+        if kind and kind.startswith("List<") and self.source == "java":
+            self.helpers.add("lib_java_text")
+            return f"_java_text({code})"
         if kind == "char":
             return f"string(1, {code})"
         if kind == "boolean":
@@ -369,6 +399,8 @@ class CppGenerator(CFamilyGenerator):
 
         if isinstance(node, FormatString):
             return self.format_string(node)
+        if kind and kind.startswith("List<") and self.source in ("python", "java"):
+            return self.to_text(node)
         if kind == "boolean" and self.source in ("python", "java"):
             words = ('"True"', '"False"') if self.source == "python" else ('"true"', '"false"')
             return f"({prec.ternary_part(self.expr(node), node)} ? {words[0]} : {words[1]})"

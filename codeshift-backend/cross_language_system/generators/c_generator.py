@@ -1,5 +1,6 @@
 import re
 
+from cross_language_system.core import library
 from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
 from cross_language_system.generators.c_family import CFamilyGenerator
@@ -158,9 +159,10 @@ class CGenerator(CFamilyGenerator):
 
     def headers(self, program, body):
         code = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n"
-        if re.search(r"\b(pow|sqrt|floor|ceil|fmod|fabs|isnan|isinf)\(", body + self.helper_code()):
+        text = body + self.helper_code()
+        if re.search(r"\b(pow|sqrt|floor|ceil|fmod|fabs|isnan|isinf|nearbyint|round|log|log10|exp|sin|cos|tan|hypot)\(", text):
             code += "#include <math.h>\n"
-        if re.search(r"\b(isupper|islower|isdigit|isalpha|isspace|isalnum|toupper|tolower)\(", body):
+        if re.search(r"\b(isupper|islower|isdigit|isalpha|isspace|isalnum|toupper|tolower)\(", text):
             code += "#include <ctype.h>\n"
         return code + "\n"
 
@@ -187,6 +189,9 @@ class CGenerator(CFamilyGenerator):
                      "read_double", "read_char", "read_word"):
             if name in self.helpers:
                 code += READ_HELPERS[name]
+        for name, helper in library.C_HELPERS.items():
+            if f"lib_{name}" in self.helpers:
+                code += helper
         return code
 
     # ---- input ----
@@ -257,6 +262,10 @@ class CGenerator(CFamilyGenerator):
 
         if self.line_based(node):
             return f"{tab}{target} = {self.read_expression(node)};\n"
+
+        if node.value_type == "String":
+            # Java's nextLine() and C++'s getline read the rest of the line.
+            return f"{tab}{target} = {self._line(node)};\n"
 
         if rendered_type == "char*":
             # A char* has no storage yet, so read into a fixed buffer.
@@ -419,6 +428,8 @@ class CGenerator(CFamilyGenerator):
         code = code.replace("<cstring>", "<string.h>")
         code = code.replace("<cmath>", "<math.h>")
         code = code.replace("<cstdio>", "<stdio.h>")
+        code = code.replace("<climits>", "<limits.h>")
+        code = code.replace("<cctype>", "<ctype.h>")
 
         code = code.replace("using namespace std;", "")
         code = re.sub(r"\bstd::", "", code)

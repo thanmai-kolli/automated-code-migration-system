@@ -1,3 +1,4 @@
+from cross_language_system.core import library
 from cross_language_system.core import precedence as prec
 from cross_language_system.core import printf_format
 from cross_language_system.core.errors import UnsupportedConstruct
@@ -37,6 +38,39 @@ HELPERS = {
         "def _char_at(text, index):\n"
         "    # A C string reads as '\\0' past its last character.\n"
         "    return text[index] if 0 <= index < len(text) else '\\0'\n"
+    ),
+    "_round_half_up": (
+        "def _round_half_up(x):\n"
+        "    # Java's Math.round: nearest integer, ties toward positive infinity.\n"
+        "    n = math.floor(x)\n"
+        "    return n + 1 if x - n >= 0.5 else n\n"
+    ),
+    "_round_away": (
+        "def _round_away(x):\n"
+        "    # C's round(): nearest integer as a double, ties away from zero.\n"
+        "    n = math.floor(abs(x))\n"
+        "    return math.copysign(n + 1 if abs(x) - n >= 0.5 else n, x)\n"
+    ),
+    "_java_split": (
+        "def _java_split(text, pattern):\n"
+        "    # Java's String.split: a regex separator, trailing empty strings dropped.\n"
+        "    if text == '':\n"
+        "        return ['']\n"
+        "    parts = re.split(pattern, text)\n"
+        "    while parts and parts[-1] == '':\n"
+        "        parts.pop()\n"
+        "    return parts\n"
+    ),
+    "_java_text": (
+        "def _java_text(x):\n"
+        "    # Java's String.valueOf: a list prints its elements' own text.\n"
+        "    if isinstance(x, bool):\n"
+        "        return 'true' if x else 'false'\n"
+        "    if isinstance(x, list):\n"
+        "        return '[' + ', '.join(_java_text(e) for e in x) + ']'\n"
+        "    if isinstance(x, dict):\n"
+        "        return '{' + ', '.join(_java_text(k) + '=' + _java_text(v) for k, v in x.items()) + '}'\n"
+        "    return 'null' if x is None else str(x)\n"
     ),
 }
 
@@ -158,9 +192,11 @@ class PythonGenerator:
             prelude += STREAM_READER
         if "_tmod" in self.helpers:
             self.helpers.add("_tdiv")
-        for name in ("_tdiv", "_tmod", "_char_at"):
+        for name in ("_tdiv", "_tmod", "_char_at", "_round_half_up", "_round_away", "_java_split", "_java_text"):
             if name in self.helpers:
                 prelude += HELPERS[name] + "\n"
+        if "_java_split" in self.helpers:
+            prelude = "import re\n" + prelude
         if prelude:
             code = prelude + "\n" + code
 
@@ -263,6 +299,9 @@ class PythonGenerator:
             return f"{tab}{self._print(stmt)}\n"
 
         if isinstance(stmt, ListAppend):
+            if self._type(stmt.list_obj) == "String":
+                # C++'s s.push_back(c) on a string.
+                return f"{tab}{self._generate_expr(stmt.list_obj)} += {self._as_text(stmt.value)}\n"
             return f"{tab}{self._receiver(stmt.list_obj)}.append({self._generate_expr(stmt.value)})\n"
 
         if isinstance(stmt, DictPut):
@@ -425,6 +464,10 @@ class PythonGenerator:
         if self.source_lang == "java" and kind == "boolean":
             return f"str({code}).lower()"
 
+        if self.source_lang == "java" and kind and kind.startswith(("List<", "Map<")):
+            self.helpers.add("_java_text")
+            return f"_java_text({code})"
+
         if self.source_lang in ("c++", "cpp"):
             # cout shows a bool as 1/0 and a double like printf's %g.
             if kind == "boolean":
@@ -443,6 +486,9 @@ class PythonGenerator:
             return prec.operand(code, expr, "Add", LANG, right=True)
         if self.source_lang == "java" and kind == "boolean":
             return f"str({code}).lower()"
+        if self.source_lang == "java" and kind and kind.startswith(("List<", "Map<")):
+            self.helpers.add("_java_text")
+            return f"_java_text({code})"
         return f"str({code})"
 
     @staticmethod
@@ -523,6 +569,10 @@ class PythonGenerator:
             self.uses_math = True
             return f"math.{name}({args})"
 
+        library_call = self._library_call(expr)
+        if library_call is not None:
+            return library_call
+
         if name in CHARACTER_METHODS and len(expr.args) == 1:
             receiver = prec.postfix_operand(self._generate_expr(expr.args[0]), expr.args[0], LANG)
             return f"{receiver}.{CHARACTER_METHODS[name]}()"
@@ -544,6 +594,36 @@ class PythonGenerator:
                     return f"self.{name}({args})"
 
         return f"{name}({args})"
+
+    def _library_call(self, expr):
+        """The calls of core/library.py; None for any other name."""
+
+        name = expr.name
+        args = [self._generate_expr(a) for a in expr.args]
+
+        if name in ("round_even", "round_digits"):
+            return f"round({', '.join(args)})"
+        if name in ("round_half_up", "round_away"):
+            self.uses_math = True
+            self.helpers.add(f"_{name}")
+            return f"_{name}({args[0]})"
+        if name == "slice":
+            receiver = prec.postfix_operand(args[0], expr.args[0], LANG)
+            bounds = ["" if isinstance(a, Constant) and a.value is None else code
+                      for a, code in zip(expr.args[1:], args[1:])]
+            return f"{receiver}[{bounds[0]}:{bounds[1]}]"
+        if name == "reversed_copy":
+            return f"{prec.postfix_operand(args[0], expr.args[0], LANG)}[::-1]"
+        if name == "sorted_copy":
+            return f"sorted({args[0]})"
+        if name == "str_join":
+            return f"{prec.postfix_operand(args[0], expr.args[0], LANG)}.join({args[1]})"
+        if name in library.MATH_NAMES:
+            self.uses_math = True
+            call = f"math.{name}({', '.join(args)})"
+            # Java's Math.floor and C's floor return a double; Python's an int.
+            return f"float({call})" if name in ("floor", "ceil") else call
+        return None
 
     def _generate_expr(self, expr):
 
@@ -703,6 +783,14 @@ class PythonGenerator:
 
             if method_name == "isEmpty" and not arg_list:
                 return f"len({self._generate_expr(expr.obj)}) == 0"
+
+            if method_name == "split" and len(arg_list) == 1 and self.source_lang == "java":
+                self.helpers.add("_java_split")
+                return f"_java_split({self._generate_expr(expr.obj)}, {args})"
+
+            # Python strings are immutable: C++'s s.clear() rebinds the name.
+            if method_name == "clear" and not arg_list and self._type(expr.obj) == "String":
+                return f"{self._generate_expr(expr.obj)} = ''"
 
             # Java's substring(a, b) is a slice.
             if method_name == "substring" and len(arg_list) in (1, 2):

@@ -1,5 +1,6 @@
 import javalang
 
+from cross_language_system.core import library
 from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
 from cross_language_system.parsers import lowering
@@ -35,7 +36,11 @@ SCANNER_READS = {
 }
 
 # Math.<name> calls every target can express under the same name.
-MATH_FUNCTIONS = {"sqrt", "pow", "abs", "max", "min", "floor", "ceil"}
+MATH_FUNCTIONS = {"abs", "max", "min"} | set(library.MATH_NAMES)
+
+# Classes that build a string in place; the IR models them as an immutable
+# string that each update reassigns.
+STRING_BUILDERS = ("StringBuilder", "StringBuffer")
 
 # Character.<name> tests, under their C names.
 CHARACTER_FUNCTIONS = {
@@ -83,6 +88,10 @@ class JavaParser:
 
     def __init__(self):
         self._temp_index = 0
+        # True only while the outermost call chain of an expression statement is
+        # parsed: a StringBuilder update is only meaningful there.
+        self._statement_level = False
+        self._builders = set()  # names declared as StringBuilder or StringBuffer
 
     def parse(self, code):
 
@@ -110,6 +119,8 @@ class JavaParser:
             declared = self._type_name(member.type)
             if declared == "Scanner":
                 continue  # stdin plumbing; reads become Input nodes
+            if getattr(member.type, "name", None) in STRING_BUILDERS:
+                self._builders.update(d.name for d in member.declarators)
             for declarator in member.declarators:
                 declared_here = self._with_dimensions(declared, declarator)
                 fields.append(Field(
@@ -163,6 +174,8 @@ class JavaParser:
         name = getattr(type_node, "name", None)
         if not name:
             return "Object"
+        if name in STRING_BUILDERS:
+            return "String"
 
         arguments = getattr(type_node, "arguments", None)
         if arguments:
@@ -229,6 +242,8 @@ class JavaParser:
             # A Scanner is Java plumbing for stdin; the IR models reads directly.
             if declared == "Scanner":
                 return None
+            if getattr(stmt.type, "name", None) in STRING_BUILDERS:
+                self._builders.update(d.name for d in stmt.declarators)
 
             declarations = []
             for d in stmt.declarators:
@@ -376,7 +391,17 @@ class JavaParser:
                     _refuse(expr, "writing to System.err")
                 return self._print(expr)
 
-            return self._handle_expression(expr)
+            self._statement_level = True
+            try:
+                node = self._handle_expression(expr)
+            finally:
+                self._statement_level = False
+            target = getattr(node, "assign_to", None)
+            if target is not None:
+                # sb.append(x); is sb = sb + x;
+                return Variable(target.name, "auto", node) if isinstance(target, Identifier) \
+                    else Assignment(target, node)
+            return node
 
         if isinstance(expr, (javalang.tree.ClassCreator, javalang.tree.This)):
             return self._handle_expression(expr)
@@ -446,7 +471,14 @@ class JavaParser:
         elif isinstance(expr, javalang.tree.Primary):
             if self._increment_in(expr):
                 _refuse(expr, "++ or -- inside an expression")
-            return self._apply_prefix(expr, self._primary(expr))
+            top, self._statement_level = self._statement_level, False
+            try:
+                node = self._primary(expr)
+            finally:
+                self._statement_level = top
+            if getattr(node, "assign_to", None) is not None and not top:
+                _refuse(expr, "using the result of a StringBuilder update inside an expression")
+            return self._apply_prefix(expr, node)
         else:
             _refuse(expr, f"the Java expression '{type(expr).__name__}' is not supported")
 
@@ -507,10 +539,25 @@ class JavaParser:
         elif isinstance(expr, javalang.tree.ClassCreator):
             if expr.body:
                 _refuse(expr, "anonymous classes")
-            node = ObjectCreation(
-                expr.type.name,
-                [self._handle_expression(a) for a in expr.arguments or []]
-            )
+            arguments = [self._handle_expression(a) for a in expr.arguments or []]
+            if expr.type.name in STRING_BUILDERS:
+                # new StringBuilder(16) only reserves capacity.
+                if not arguments or (isinstance(arguments[0], Constant) and isinstance(arguments[0].value, int)
+                                     and not isinstance(arguments[0].value, bool)):
+                    node = Constant("")
+                else:
+                    node = TypeCast("str", arguments[0])
+                node.builder = True
+            elif expr.type.name in ("ArrayList", "LinkedList", "Vector") and len(arguments) == 1:
+                # new ArrayList<>(xs) copies xs; new ArrayList<>(10) only reserves capacity.
+                if isinstance(arguments[0], ArrayLiteral):
+                    node = arguments[0]
+                elif isinstance(arguments[0], Constant) and isinstance(arguments[0].value, int):
+                    node = ObjectCreation(expr.type.name, [])
+                else:
+                    node = FunctionCall("slice", [arguments[0], Constant(None), Constant(None)])
+            else:
+                node = ObjectCreation(expr.type.name, arguments)
 
         else:
             _refuse(expr, f"the Java expression '{type(expr).__name__}' is not supported")
@@ -567,6 +614,21 @@ class JavaParser:
         if qualifier == "Math" and expr.member in MATH_FUNCTIONS:
             return FunctionCall(expr.member, args)
 
+        if qualifier == "Math" and expr.member == "round" and len(args) == 1:
+            return FunctionCall("round_half_up", args)
+
+        if qualifier == "Math" and expr.member in ("floorDiv", "floorMod") and len(args) == 2:
+            return BinaryOp(args[0], "FloorDiv" if expr.member == "floorDiv" else "FloorMod", args[1])
+
+        if qualifier == "Arrays" and expr.member == "sort" and len(args) == 1:
+            return MethodCall(args[0], "sort", [])
+
+        if (qualifier, expr.member) in (("Arrays", "asList"), ("List", "of")):
+            return ArrayLiteral(args)
+
+        if qualifier == "Collections" and expr.member == "reverse" and len(args) == 1:
+            return self._updated(args[0], FunctionCall("reversed_copy", [args[0]]))
+
         if qualifier == "Character" and expr.member in CHARACTER_FUNCTIONS and len(args) == 1:
             return FunctionCall(CHARACTER_FUNCTIONS[expr.member], args)
 
@@ -603,10 +665,64 @@ class JavaParser:
             return IndexAccess(obj, args[0])
         if member == "contains" and len(args) == 1:
             return BooleanOp(args[0], "In", obj)
+        if member == "isEmpty" and not args:
+            return BooleanOp(MethodCall(obj, "size", []), "Eq", Constant(0))
+        if member == "toCharArray" and not args:
+            return obj
+        if member == "toString" and not args:
+            node = TypeCast("str", obj)
+            node.assign_to = getattr(obj, "assign_to", None)
+            return node
+
+        builder = self._builder_update(obj, member, args)
+        if builder is not None:
+            return builder
+
         if member in STRING_METHODS:
             return MethodCall(obj, STRING_METHODS[member], args)
 
         return MethodCall(obj, member, args)
+
+    @staticmethod
+    def _updated(target, value):
+        """value, marked as the new content of target (a name updated in place)."""
+        value.assign_to = target if isinstance(target, (Identifier, AttributeAccess)) else None
+        return value
+
+    def _builder_update(self, obj, member, args):
+        """StringBuilder updates as a new string value; None for other calls."""
+
+        root = obj.attribute if isinstance(obj, AttributeAccess) else getattr(obj, "name", None)
+        if not (getattr(obj, "builder", False) or getattr(obj, "assign_to", None) is not None
+                or (isinstance(obj, (Identifier, AttributeAccess)) and root in self._builders)):
+            return None
+        target = getattr(obj, "assign_to", None) or obj
+
+        def slice_of(start, end=None):
+            return FunctionCall("slice", [obj, start, end if end is not None else Constant(None)])
+
+        if member == "append" and len(args) == 1:
+            value = BinaryOp(obj, "Add", args[0])
+        elif member == "reverse" and not args:
+            value = FunctionCall("reversed_copy", [obj])
+        elif member == "insert" and len(args) == 2:
+            if isinstance(args[0], Constant) and args[0].value == 0:
+                value = BinaryOp(TypeCast("str", args[1]), "Add", obj)
+            else:
+                value = BinaryOp(BinaryOp(slice_of(Constant(0), args[0]), "Add", args[1]), "Add",
+                                 slice_of(args[0]))
+        elif member == "setLength" and len(args) == 1:
+            value = Constant("") if isinstance(args[0], Constant) and args[0].value == 0 \
+                else slice_of(Constant(0), args[0])
+        elif member == "deleteCharAt" and len(args) == 1:
+            value = BinaryOp(slice_of(Constant(0), args[0]), "Add", slice_of(BinaryOp(args[0], "Add", Constant(1))))
+        elif member == "setCharAt" and len(args) == 2:
+            value = BinaryOp(BinaryOp(slice_of(Constant(0), args[0]), "Add", args[1]), "Add",
+                             slice_of(BinaryOp(args[0], "Add", Constant(1))))
+        else:
+            return None
+        value.builder = True
+        return self._updated(target, value)
 
     def _literal(self, expr):
 

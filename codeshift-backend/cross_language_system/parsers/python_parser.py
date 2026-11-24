@@ -1,13 +1,16 @@
 import ast
+import math
 import string
 
+from cross_language_system.core import library
 from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
 from cross_language_system.core.printf_format import python_spec_to_c
 
 
 # math.<name>(...) calls every target can express.
-MATH_FUNCTIONS = {"sqrt", "pow", "floor", "ceil"}
+MATH_FUNCTIONS = set(library.MATH_NAMES)
+MATH_CONSTANTS = {"pi": math.pi, "e": math.e}
 
 
 def _refuse(node, what):
@@ -228,16 +231,12 @@ class PythonParser:
             if node.orelse:
                 _refuse(node, "for ... else")
 
-            if isinstance(node.target, ast.Name):
-                iterator = node.target.id
-            elif isinstance(node.target, ast.Tuple):
-                iterator = ", ".join(
-                    e.id for e in node.target.elts if isinstance(e, ast.Name)
-                )
-            else:
-                iterator = "item"
+            if isinstance(node.target, ast.Tuple):
+                return self._tuple_for(node)
+            if not isinstance(node.target, ast.Name):
+                _refuse(node, "a for loop over this kind of target")
 
-            return ForLoop(iterator, self._handle_expr(node.iter), self._handle_body(node.body))
+            return ForLoop(node.target.id, self._handle_expr(node.iter), self._handle_body(node.body))
 
         if isinstance(node, ast.While):
             if node.orelse:
@@ -325,6 +324,13 @@ class PythonParser:
 
     def _handle_assign(self, node):
 
+        # xs = list(map(int, input().split())) abbreviates a comprehension.
+        comprehension = self._map_as_comprehension(node.value)
+        if comprehension is not None and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            desugared = self._desugar_comprehension(node.targets[0].id, comprehension)
+            if desugared is not None:
+                return desugared
+
         # A comprehension has no equivalent in any target, but the loop it
         # stands for does, so desugar it before anything else sees it.
         if isinstance(node.value, (ast.ListComp, ast.SetComp)) and len(node.targets) == 1:
@@ -343,11 +349,13 @@ class PythonParser:
 
                 # a, b = input().split() is N whitespace-delimited reads, which
                 # every target language expresses directly.
-                if self._is_split_of_input(value):
+                read_type = self._split_read_type(value)
+                if read_type is not None:
                     for element in target_node.elts:
-                        statements.append(
-                            self._assign_to(element, Input(None, "token"))
-                        )
+                        read = Input(None, "token")
+                        if read_type != "token":
+                            read = TypeCast(read_type, read)
+                        statements.append(self._assign_to(element, read))
                     # input() consumed the whole line; so must the translation.
                     statements.append(Input(None, "eol"))
                     continue
@@ -393,6 +401,88 @@ class PythonParser:
             and not value.args
             and isinstance(value.obj, Input)
         )
+
+    def _split_read_type(self, value):
+        """Read type of input().split() or map(int, input().split()), else None."""
+
+        if self._is_split_of_input(value):
+            return "token"
+        if (isinstance(value, FunctionCall) and value.name == "map" and len(value.args) == 2
+                and isinstance(value.args[0], Identifier) and self._is_split_of_input(value.args[1])):
+            return {"int": "int", "float": "float", "str": "token"}.get(value.args[0].name)
+        return None
+
+    @classmethod
+    def _map_as_comprehension(cls, node):
+        """list(map(int, xs)) as the AST of [int(_v) for _v in xs], else None."""
+
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "list"
+                and len(node.args) == 1 and not node.keywords):
+            return None
+        inner = node.args[0]
+        if not (isinstance(inner, ast.Call) and isinstance(inner.func, ast.Name) and inner.func.id == "map"
+                and len(inner.args) == 2 and not inner.keywords
+                and isinstance(inner.args[0], ast.Name) and inner.args[0].id in cls.BUILTIN_CASTS):
+            return None
+        item = ast.Name(id="_v", ctx=ast.Load())
+        return ast.ListComp(
+            elt=ast.Call(func=inner.args[0], args=[item], keywords=[]),
+            generators=[ast.comprehension(target=ast.Name(id="_v", ctx=ast.Store()),
+                                          iter=inner.args[1], ifs=[], is_async=0)],
+        )
+
+    def _tuple_for(self, node):
+        """for i, x in enumerate(xs) / for k, v in d.items() / for a, b in zip(xs, ys).
+
+        Each becomes a loop over a hidden index or key, and the names are assigned
+        at the top of the body, so a body that reassigns them cannot change the
+        iteration (as in Python).
+        """
+
+        names = [e.id if isinstance(e, ast.Name) else None for e in node.target.elts]
+        call = node.iter
+        if None in names or not isinstance(call, ast.Call) or call.keywords:
+            _refuse(node, "a for loop that unpacks this kind of value")
+
+        self._temp_index += 1
+        index = f"_i{self._temp_index}"
+        func = call.func
+        prologue = []
+
+        def once(expression_node, label):
+            if isinstance(expression_node, ast.Name):
+                return Identifier(expression_node.id)
+            temp = f"_{label}{self._temp_index}"
+            prologue.append(Variable(temp, value=self._handle_expr(expression_node)))
+            return Identifier(temp)
+
+        if isinstance(func, ast.Name) and func.id == "enumerate" and len(names) == 2 and len(call.args) in (1, 2):
+            sequence = once(call.args[0], "seq")
+            position = Identifier(index)
+            if len(call.args) == 2:
+                position = BinaryOp(position, "Add", self._handle_expr(call.args[1]))
+            header = [Variable(names[0], value=position),
+                      Variable(names[1], value=IndexAccess(sequence, Identifier(index)))]
+            loop = ForLoop(index, RangeCall([MethodCall(sequence, "size", [])]), header + self._handle_body(node.body))
+            return prologue + [loop]
+
+        if isinstance(func, ast.Name) and func.id == "zip" and len(call.args) == len(names) >= 2:
+            sequences = [once(argument, f"seq{n}_") for n, argument in enumerate(call.args)]
+            length = MethodCall(sequences[0], "size", [])
+            for sequence in sequences[1:]:
+                length = FunctionCall("min", [length, MethodCall(sequence, "size", [])])
+            header = [Variable(name, value=IndexAccess(sequence, Identifier(index)))
+                      for name, sequence in zip(names, sequences)]
+            loop = ForLoop(index, RangeCall([length]), header + self._handle_body(node.body))
+            return prologue + [loop]
+
+        if (isinstance(func, ast.Attribute) and func.attr == "items" and not call.args and len(names) == 2):
+            mapping = once(func.value, "map")
+            header = [Variable(names[0], value=Identifier(index)),
+                      Variable(names[1], value=IndexAccess(mapping, Identifier(index)))]
+            return prologue + [ForLoop(index, mapping, header + self._handle_body(node.body))]
+
+        _refuse(node, "a for loop that unpacks this kind of value")
 
     def _parallel_assign(self, targets, values):
         """a, b = b, a + b evaluates every right-hand side before assigning.
@@ -491,6 +581,9 @@ class PythonParser:
             return Identifier(node.id)
 
         if isinstance(node, ast.Attribute):
+            if (isinstance(node.value, ast.Name) and node.value.id == "math"
+                    and node.attr in MATH_CONSTANTS):
+                return Constant(MATH_CONSTANTS[node.attr])
             return AttributeAccess(self._handle_expr(node.value), node.attr)
 
         if isinstance(node, ast.BinOp):
@@ -565,7 +658,7 @@ class PythonParser:
 
         if isinstance(node, ast.Subscript):
             if isinstance(node.slice, ast.Slice):
-                _refuse(node, "slicing")
+                return self._slice(node)
             container = self._handle_expr(node.value)
             index = node.slice
             # xs[-1] counts from the end, which no target's indexing does.
@@ -583,6 +676,22 @@ class PythonParser:
             return IndexAccess(container, self._handle_expr(index))
 
         _refuse(node, f"the '{type(node).__name__}' expression is not supported")
+
+    def _slice(self, node):
+        """s[a:b] and s[::-1]; any other step is refused."""
+
+        bounds = node.slice
+        container = self._handle_expr(node.value)
+        step = bounds.step
+        if step is not None:
+            reverse = (isinstance(step, ast.UnaryOp) and isinstance(step.op, ast.USub)
+                       and isinstance(step.operand, ast.Constant) and step.operand.value == 1)
+            if reverse and bounds.lower is None and bounds.upper is None:
+                return FunctionCall("reversed_copy", [container])
+            _refuse(node, "slicing with a step")
+        lower = self._handle_expr(bounds.lower) if bounds.lower is not None else Constant(None)
+        upper = self._handle_expr(bounds.upper) if bounds.upper is not None else Constant(None)
+        return FunctionCall("slice", [container, lower, upper])
 
     def _formatted_value(self, node):
         """One {value:spec} hole of an f-string."""
@@ -630,6 +739,15 @@ class PythonParser:
                 # The builtin keeps ints integral, unlike math.pow.
                 return BinaryOp(args[0], "Pow", args[1])
 
+            if name == "round" and len(args) in (1, 2):
+                return FunctionCall("round_even" if len(args) == 1 else "round_digits", args)
+
+            if name == "sorted" and len(args) == 1:
+                return FunctionCall("sorted_copy", args)
+
+            if name == "reversed" and len(args) == 1:
+                return FunctionCall("reversed_copy", args)
+
             if name == "input":
                 return Input(args[0] if args else None)
 
@@ -666,6 +784,9 @@ class PythonParser:
                 and node.func.value.id == "math"
                 and method in MATH_FUNCTIONS
             ):
+                # Python's math.floor and math.ceil return an int, C's and Java's a double.
+                if method in ("floor", "ceil"):
+                    return TypeCast("int", FunctionCall(method, args))
                 return FunctionCall(method, args)
 
             # "{} and {}".format(a, b) is an f-string written the old way.
@@ -680,6 +801,12 @@ class PythonParser:
 
             if method == "append" and args:
                 return ListAppend(obj, args[0])
+
+            if method in library.CHAR_TESTS and not args:
+                return FunctionCall(method, [obj])
+
+            if method == "join" and len(args) == 1:
+                return FunctionCall("str_join", [obj, args[0]])
 
             return MethodCall(obj, method, args)
 

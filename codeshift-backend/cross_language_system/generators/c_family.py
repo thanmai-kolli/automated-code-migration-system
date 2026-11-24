@@ -6,6 +6,7 @@ but leaves Python->C/C++ unimplemented. This module renders a real IR into eithe
 language so every source/target pair is covered.
 """
 
+from cross_language_system.core import library
 from cross_language_system.core import precedence as prec
 from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
@@ -489,7 +490,11 @@ class CFamilyGenerator:
             )
 
         if isinstance(node, IndexAccess):
-            return f"{self.receiver(node.obj)}[{self.expr(node.index)}]"
+            element = f"{self.receiver(node.obj)}[{self.expr(node.index)}]"
+            if self.cpp and self.source == "python" and self._type(node.obj) == "String":
+                # Indexing a Python string gives a one-character string.
+                return f"string(1, {element})"
+            return element
 
         if isinstance(node, TypeCast):
             return self.cast(node)
@@ -644,6 +649,10 @@ class CFamilyGenerator:
 
     def call(self, node):
 
+        library_call = self.library_call(node)
+        if library_call is not None:
+            return library_call
+
         args = ", ".join(self.expr(a) for a in node.args)
         name = node.name
 
@@ -662,6 +671,50 @@ class CFamilyGenerator:
             name = {"double": "fabs", "long": "llabs"}.get(kind, "abs")
 
         return f"{name}({args})"
+
+    def library_call(self, node):
+        """The calls of core/library.py; None for any other name."""
+
+        name = node.name
+        args = [self.expr(a) for a in node.args]
+        kind = self._type(node.args[0]) if node.args else None
+
+        if name == "round_even":
+            return f"(int) nearbyint({args[0]})"
+        if name == "round_digits":
+            self.helpers.add("lib_py_round")
+            return f"_py_round({args[0]}, {args[1]})"
+        if name == "round_half_up":
+            self.helpers.add("lib_round_half_up")
+            return f"_round_half_up({args[0]})"
+        if name == "round_away":
+            return f"round({args[0]})"
+        if name in library.CHAR_TESTS and len(args) == 1 and kind != "char":
+            # Python's str tests; the helper also accepts a single character.
+            self.helpers.add("lib_tests")
+            return f"_py_{name}({args[0]})"
+        if name not in library.NEEDS_CONTAINERS:
+            return None
+
+        if not self.cpp:
+            raise UnsupportedConstruct(f"{name.replace('_', ' ')} on a string or list in C")
+        if isinstance(node.args[0], Constant) and isinstance(node.args[0].value, str):
+            args[0] = f"string({args[0]})"
+        if name == "slice":
+            self.helpers.add("lib_slice")
+            lower = "0" if isinstance(node.args[1], Constant) and node.args[1].value is None else args[1]
+            upper = "_END" if isinstance(node.args[2], Constant) and node.args[2].value is None else args[2]
+            return f"_slice({args[0]}, {lower}, {upper})"
+        if name == "reversed_copy":
+            self.helpers.add("lib_reversed")
+            return f"_reversed({args[0]})"
+        if name == "sorted_copy":
+            if kind == "String":
+                raise UnsupportedConstruct("sorted() over a string")
+            self.helpers.add("lib_sorted")
+            return f"_sorted({args[0]})"
+        self.helpers.add("lib_join")
+        return f"_join({args[0]}, {args[1]})"
 
     def _expr_type(self, node):
         """Best-effort static type, used only to pick a conversion form."""
@@ -728,6 +781,20 @@ class CFamilyGenerator:
                 return f"{obj}.count({args})"
             if node.method in ("isEmpty",):
                 return f"{obj}.empty()"
+            first = self.expr(node.args[0]) if node.args else ""
+            if node.method == "replace" and len(node.args) == 2 and self._type(node.obj) == "String":
+                self.helpers.add("lib_replace")
+                return f"_replace_all({self.expr(node.obj)}, {first}, {self.expr(node.args[1])})"
+            if node.method == "count" and len(node.args) == 1:
+                self.helpers.add("lib_count")
+                return f"_count({self.expr(node.obj)}, {first})"
+            if node.method == "reverse" and not node.args:
+                return f"reverse({obj}.begin(), {obj}.end())"
+            if node.method == "pop" and len(node.args) <= 1:
+                self.helpers.add("lib_pop")
+                return f"_pop({self.expr(node.obj)}{', ' + first if node.args else ''})"
+            if node.method == "insert" and len(node.args) == 2:
+                return f"{obj}.insert({obj}.begin() + {first}, {self.expr(node.args[1])})"
             return f"{obj}.{node.method}({args})"
 
         raise UnsupportedConstruct(f"the method call .{node.method}() in C")
@@ -827,6 +894,8 @@ class CFamilyGenerator:
         if isinstance(stmt, ListAppend):
             target = self.receiver(stmt.list_obj)
             if self.cpp:
+                if self._type(stmt.list_obj) == "String":
+                    return f"{tab}{target} += {self.expr(stmt.value)};\n"
                 return f"{tab}{target}.push_back({self.expr(stmt.value)});\n"
             raise UnsupportedConstruct("growing a list in C (arrays have a fixed size)")
 
@@ -899,8 +968,17 @@ class CFamilyGenerator:
                               f"{name} > {end}; {name} += {step_code}")
             code = f"{tab}for ({header}) {{\n"
         elif self.cpp:
-            code = f"{tab}for (auto {stmt.iterator} : {self.expr(stmt.iterable)}) {{\n"
+            if (self._type(stmt.iterable) or "").startswith("Map<"):
+                raise UnsupportedConstruct("iterating a map in C++ (std::map visits keys in sorted order)")
+            if self.source == "python" and self._type(stmt.iterable) == "String":
+                # A Python string yields one-character strings, not chars.
+                code = (f"{tab}for (char _c_{stmt.iterator} : {self.expr(stmt.iterable)}) {{\n"
+                        f"{tab}    string {stmt.iterator}(1, _c_{stmt.iterator});\n")
+            else:
+                code = f"{tab}for (auto {stmt.iterator} : {self.expr(stmt.iterable)}) {{\n"
         else:
+            if self._type(stmt.iterable) == "String":
+                raise UnsupportedConstruct("iterating over the characters of a string in C")
             if not isinstance(stmt.iterable, Identifier):
                 raise UnsupportedConstruct("iterating over an expression in C")
             name = self.expr(stmt.iterable)

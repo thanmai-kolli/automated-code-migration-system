@@ -100,6 +100,13 @@ SCANF_TYPES = {"d": "int", "i": "int", "u": "int", "f": "double", "e": "double",
 STREAM_MANIPULATORS = {"fixed", "setprecision", "setw", "scientific", "boolalpha", "left",
                        "right", "setfill", "showpoint", "hex", "dec", "oct", "noboolalpha"}
 
+# Manipulators whose effect lasts until changed (setw affects one item only).
+STICKY_MANIPULATORS = {"fixed", "setprecision", "left", "right"}
+
+# C and C++ conversions that are casts in the IR.
+CONVERSIONS = {"stoi": "int", "atoi": "int", "stol": "long", "stoll": "long", "atol": "long",
+               "atoll": "long", "stod": "float", "stof": "float", "atof": "float"}
+
 SCALARS = {"int", "long", "double", "char", "boolean", "String"}
 
 # <limits.h> / <climits> constants, as plain values.
@@ -173,6 +180,12 @@ class CLikeParser:
         # below) and the char arrays that hold C strings.
         self.var_types = {}
         self.c_strings = set()
+        # cout formatting state, tracked in program order within one function.
+        self.stream = {"fixed": False, "precision": None, "left": False}
+        self.block_depth = 0
+        self.current_function = None
+        self.sticky_in = set()      # functions that set fixed/setprecision/left
+        self.cout_in = set()        # functions that print computed values
 
     # ------------------------------------------------------------
     # TOKEN HELPERS
@@ -248,6 +261,9 @@ class CLikeParser:
 
         program = Program(body)
         self._refuse_leftover_steps(program)
+        if self.sticky_in and self.cout_in - self.sticky_in:
+            # The stream state set in one function would also govern the others.
+            raise UnsupportedConstruct("stream manipulators that would apply across functions")
         return program
 
     def _refuse_leftover_steps(self, program):
@@ -297,6 +313,7 @@ class CLikeParser:
 
     def _parse_type(self):
 
+        self.last_base_type = None
         constant = False
         while self.value() in QUALIFIERS:
             constant = constant or self.value() == "const"
@@ -325,6 +342,8 @@ class CLikeParser:
             while self.accept("::"):
                 parts.append(self.next()[1])
             name = "::".join(parts)
+        # Remembered so a declaration can tell std::string from char*.
+        self.last_base_type = name.split("::")[-1]
 
         while self.value() in QUALIFIERS:
             constant = constant or self.value() == "const"
@@ -436,6 +455,8 @@ class CLikeParser:
                 raise SyntaxError("only a constructor may have an initializer list")
             prelude = self._parse_member_initializers()
 
+        self.current_function = f"{owner}::{name}" if owner else name
+        self.stream = {"fixed": False, "precision": None, "left": False}
         body = self._parse_block()
 
         return Function(
@@ -580,10 +601,23 @@ class CLikeParser:
                 continue
 
             while True:
-                value = None
+                field_type, value = declared, None
+                dimensions = []
+                while self.accept("["):
+                    dimensions.append(self._parse_value())
+                    self.expect("]")
+                if dimensions:
+                    if declared == "char" and len(dimensions) == 1:
+                        # char name[32]; holds a C string.
+                        field_type = "String"
+                    else:
+                        for _ in dimensions:
+                            field_type = f"List<{self._box(field_type)}>"
+                        value = FunctionCall("range_array", dimensions)
+                        value.element_type = declared
                 if self.accept("="):
                     value = self._parse_value()
-                fields.append(Field(member, declared, value))
+                fields.append(Field(member, field_type, value))
                 if not self.accept(","):
                     break
                 member = self.next()[1]
@@ -600,6 +634,14 @@ class CLikeParser:
     # ------------------------------------------------------------
 
     def _parse_block(self):
+
+        self.block_depth += 1
+        try:
+            return self._parse_block_body()
+        finally:
+            self.block_depth -= 1
+
+    def _parse_block_body(self):
 
         body = []
 
@@ -739,6 +781,16 @@ class CLikeParser:
                 and len(expression.args) == 1:
             return ListAppend(expression.obj, expression.args[0])
 
+        target = getattr(expression, "assign_to", None)
+        if target is not None:
+            # s.pop_back() on a string is s = s[:-1].
+            return self._assign(target, expression)
+
+        # reverse(v.begin(), v.end()) reverses the whole container.
+        container = self._whole_range(expression, "reverse")
+        if container is not None:
+            return self._assign(container, FunctionCall("reversed_copy", [container]))
+
         # std::swap(a, b) exchanges two variables or elements.
         if isinstance(expression, FunctionCall) and expression.name == "swap" and len(expression.args) == 2:
             first, second = expression.args
@@ -760,6 +812,20 @@ class CLikeParser:
             raise UnsupportedConstruct("an expression statement with no effect")
 
         return expression
+
+    @staticmethod
+    def _whole_range(call, name, extra=0):
+        """The container c of name(c.begin(), c.end()[, ...]), else None."""
+
+        if not (isinstance(call, FunctionCall) and call.name == name and len(call.args) == 2 + extra):
+            return None
+        begin, end = call.args[:2]
+        if (isinstance(begin, MethodCall) and isinstance(end, MethodCall)
+                and (begin.method, end.method) in (("begin", "end"), ("rbegin", "rend"))
+                and isinstance(begin.obj, Identifier) and isinstance(end.obj, Identifier)
+                and begin.obj.name == end.obj.name):
+            return begin.obj
+        return None
 
     @staticmethod
     def _assign(target, value):
@@ -797,6 +863,11 @@ class CLikeParser:
             elif declared in self.records:
                 # A struct variable is a value that already exists in C.
                 value = ObjectCreation(declared, [])
+            elif not dimensions and getattr(self, "last_base_type", None) in ("string", "vector", "set") \
+                    and declared == self._declared_container(declared):
+                # std::string s; and std::vector<int> v; start out empty.
+                value = Constant("") if declared == "String" else \
+                    (SetLiteral() if declared.startswith("Set<") else ArrayLiteral())
 
             if dimensions and None in dimensions and not isinstance(value, ArrayLiteral):
                 if not (declared == "char" and isinstance(value, Constant)):
@@ -822,12 +893,24 @@ class CLikeParser:
         self.expect(";")
         return declarations[0] if len(declarations) == 1 else declarations
 
+    @staticmethod
+    def _declared_container(declared):
+        """declared itself when it is a std::string, vector or set type, else None."""
+        if declared == "String" or declared.startswith(("List<", "Set<")):
+            return declared
+        return None
+
     def _constructor_arguments(self, declared):
         """vector<int> v(n);  Account a(100);"""
 
         self.expect("(")
         args = self._call_arguments()
         self.expect(")")
+        if declared in ("String", ) or declared.startswith("List<"):
+            # string r(s.rbegin(), s.rend()); is a reversed copy.
+            reversed_copy = self._call("string", args)
+            if isinstance(reversed_copy, FunctionCall) and reversed_copy.name == "reversed_copy":
+                return reversed_copy
         if declared.startswith("List<"):
             if len(args) != 1:
                 raise UnsupportedConstruct("vector constructors other than vector<T>(n)")
@@ -950,6 +1033,7 @@ class CLikeParser:
         self.index += 1  # cout
 
         parts = []
+        width = None
         while self.accept("<<"):
             self._skip_namespace()
             if self.value() == "endl":
@@ -960,11 +1044,49 @@ class CLikeParser:
                 self.index += 1
                 continue
             if self.value() in STREAM_MANIPULATORS:
-                raise UnsupportedConstruct(f"the stream manipulator {self.value()}")
-            parts.append(self._parse_binary(ABOVE_SHIFT))
+                width = self._manipulator(width)
+                continue
+            item = self._parse_binary(ABOVE_SHIFT)
+            if not isinstance(item, Constant):
+                self.cout_in.add(self.current_function)
+            state = self.stream
+            if width is not None or state["fixed"] or state["precision"] is not None or state["left"]:
+                # The annotator picks the conversion once the item's type is known.
+                formatted = FormatString("", [item])
+                formatted.stream = (state["fixed"], state["precision"], width, state["left"])
+                item, width = formatted, None
+            parts.append(item)
 
         self.expect(";")
         return PrintStatement(parts, end="", sep="")
+
+    def _manipulator(self, width):
+        """Apply one stream manipulator; returns the width for the next item."""
+
+        name = self.next()[1]
+        if name not in STICKY_MANIPULATORS and name != "setw":
+            raise UnsupportedConstruct(f"the stream manipulator {name}")
+        argument = None
+        if name in ("setw", "setprecision"):
+            self.expect("(")
+            value = self._parse_value()
+            self.expect(")")
+            if not (isinstance(value, Constant) and isinstance(value.value, int)):
+                raise UnsupportedConstruct(f"{name} with a computed argument")
+            argument = value.value
+        if name == "setw":
+            return argument
+        if self.block_depth > 1:
+            # Inside a branch or loop the state after it depends on the path taken.
+            raise UnsupportedConstruct(f"the stream manipulator {name} inside a branch or loop")
+        self.sticky_in.add(self.current_function)
+        if name == "fixed":
+            self.stream["fixed"] = True
+        elif name == "setprecision":
+            self.stream["precision"] = argument
+        else:
+            self.stream["left"] = name == "left"
+        return width
 
     def _parse_cin(self):
         """cin >> a >> b  ->  one read per target."""
@@ -1188,7 +1310,7 @@ class CLikeParser:
                 args = self._call_arguments()
                 self.expect(")")
                 if isinstance(node, Identifier):
-                    node = FunctionCall(node.name, args)
+                    node = self._call(node.name, args)
                 elif isinstance(node, AttributeAccess):
                     node = self._method(node.obj, node.attribute, args)
                 else:
@@ -1219,11 +1341,55 @@ class CLikeParser:
 
         return node
 
-    @staticmethod
-    def _method(obj, member, args):
+    def _method(self, obj, member, args):
         if member in ("length", "size") and not args:
             return MethodCall(obj, "size", [])
+        if member == "c_str" and not args:
+            return obj
+        if member == "empty" and not args:
+            return BooleanOp(MethodCall(obj, "size", []), "Eq", Constant(0))
+        if member == "at" and len(args) == 1:
+            return IndexAccess(obj, args[0])
+        if member == "substr" and len(args) in (1, 2):
+            end = BinaryOp(args[0], "Add", args[1]) if len(args) == 2 else Constant(None)
+            return FunctionCall("slice", [obj, args[0], end])
+        if member == "back" and not args:
+            return IndexAccess(obj, BinaryOp(MethodCall(obj, "size", []), "Sub", Constant(1)))
+        if member == "front" and not args:
+            return IndexAccess(obj, Constant(0))
+        if member == "pop_back" and not args:
+            if isinstance(obj, Identifier) and self.var_types.get(obj.name) == "String":
+                shortened = FunctionCall("slice", [obj, Constant(0), Constant(-1)])
+                shortened.assign_to = obj
+                return shortened
+            return MethodCall(obj, "pop", [])
         return MethodCall(obj, member, args)
+
+    def _call(self, name, args):
+        """A call by name, with C and C++ library idioms lowered."""
+
+        if name in CONVERSIONS and len(args) == 1:
+            return TypeCast(CONVERSIONS[name], args[0])
+        if name == "to_string" and len(args) == 1:
+            # to_string(2.5) is "2.500000": the conversion depends on the type.
+            text = FormatString("", args)
+            text.to_string = True
+            return text
+        if name == "fabs" and len(args) == 1:
+            return FunctionCall("abs", args)
+        if name == "round" and len(args) == 1:
+            return FunctionCall("round_away", args)
+        if name in ("lround", "llround") and len(args) == 1:
+            return TypeCast("long", FunctionCall("round_away", args))
+        call = FunctionCall(name, args)
+        if name in ("string", "vector"):
+            container = self._whole_range(call, name)
+            if container is not None and args[0].method == "rbegin":
+                return FunctionCall("reversed_copy", [container])
+        container = self._whole_range(call, "count", extra=1)
+        if container is not None:
+            return MethodCall(container, "count", [args[2]])
+        return call
 
     def _parse_primary(self):
 
@@ -1297,6 +1463,9 @@ class CLikeParser:
                 return SelfRef()
             while self.accept("::"):
                 text = self.next()[1]
+            if text == "npos":
+                # find() reports absence as npos; the IR's find returns -1.
+                return Constant(-1)
             return Identifier(text)
 
         raise UnsupportedConstruct(f"unexpected '{text}' in an expression")

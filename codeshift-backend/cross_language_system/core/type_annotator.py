@@ -18,6 +18,7 @@ semantics) or FloorDiv/FloorMod (Python semantics), so generators never have
 to guess.
 """
 
+from cross_language_system.core import library
 from cross_language_system.core.ir_nodes import *
 
 NUMERIC = ("int", "long", "double")
@@ -462,7 +463,7 @@ class TypeAnnotator:
     def _visit_statement(self, stmt, scope):
 
         if isinstance(stmt, Variable):
-            inferred = self.infer(stmt.value, scope)
+            inferred = self._widened(stmt.value, self.infer(stmt.value, scope))
             declared = stmt.var_type and stmt.var_type not in ("auto", UNKNOWN)
             existing = scope.get(stmt.name)
             if self.c_semantics and declared:
@@ -501,7 +502,8 @@ class TypeAnnotator:
         elif isinstance(stmt, AugAssign):
             self.infer(stmt.value, scope)
             # x op= v has the type of x op v (Python's x /= 2 makes x a float).
-            value_type = self._infer(BinaryOp(stmt.target, stmt.operator, stmt.value), scope)
+            value_type = self._widened(BinaryOp(stmt.target, stmt.operator, stmt.value),
+                                       self._infer(BinaryOp(stmt.target, stmt.operator, stmt.value), scope))
             if isinstance(stmt.target, Identifier):
                 current = scope.get(stmt.target.name)
                 # x /= 2 on an int stays an int in C and Java.
@@ -529,6 +531,10 @@ class TypeAnnotator:
             iterable_type = self.infer(stmt.iterable, scope)
             if isinstance(stmt.iterable, RangeCall):
                 scope.set(stmt.iterator, "int")
+            elif isinstance(iterable_type, str) and iterable_type.startswith("Map<"):
+                # Iterating a dictionary visits its keys.
+                key = iterable_type[4:-1].split(",")[0].strip()
+                scope.set(stmt.iterator, self._element_type(f"List<{key}>"))
             else:
                 scope.set(stmt.iterator, self._element_type(iterable_type))
             for s in stmt.body:
@@ -627,9 +633,13 @@ class TypeAnnotator:
                     return integral
                 return "double"
             if operator == "Pow":
-                # int ** int stays integral in Python.
-                return "double" if "double" in (left, right) else integral
+                # int ** int stays integral in Python, and unbounded.
+                if "double" in (left, right):
+                    return "double"
+                return "long" if not self.c_semantics else integral
             if operator in ("BitAnd", "BitOr", "BitXor", "LShift", "RShift"):
+                if operator == "LShift" and not self.c_semantics:
+                    return "long"
                 return integral
             if "double" in (left, right):
                 return "double"
@@ -656,6 +666,8 @@ class TypeAnnotator:
         if isinstance(expr, FormatString):
             for arg in expr.args:
                 self.infer(arg, scope)
+            if getattr(expr, "stream", None) is not None or getattr(expr, "to_string", False):
+                expr.fmt = self._deferred_format(expr)
             return "String"
 
         if isinstance(expr, TypeCast):
@@ -712,6 +724,9 @@ class TypeAnnotator:
             self._record_call(expr.name, arg_types)
             if expr.name in self.functions:
                 return self.functions[expr.name]
+            library_type = library.result_type(expr.name, arg_types)
+            if library_type is not None:
+                return library_type
             if expr.name in MATH_RETURNS:
                 return MATH_RETURNS[expr.name]
             if expr.name in ("isupper", "islower", "isdigit", "isalpha", "isspace", "isalnum"):
@@ -742,8 +757,12 @@ class TypeAnnotator:
                 return "List<String>"
             if expr.method in ("keys", "values"):
                 return "List<Object>"
-            if expr.method in ("upper", "lower", "strip", "toUpperCase", "toLowerCase", "trim"):
+            if expr.method in ("upper", "lower", "strip", "toUpperCase", "toLowerCase", "trim", "replace"):
                 return "String" if obj_type == "String" else UNKNOWN
+            if expr.method in ("count", "find", "index"):
+                return "int"
+            if expr.method == "pop":
+                return self._element_type(obj_type)
             return UNKNOWN
 
         if isinstance(expr, IndexAccess):
@@ -761,12 +780,45 @@ class TypeAnnotator:
     # HELPERS
     # ------------------------------------------------------------
 
+    def _widened(self, value, inferred):
+        """A Python int that can grow past 32 bits needs a 64-bit slot.
+
+        Python integers never overflow; products, powers and shifts are where
+        a translated int overflows in practice (factorials, 10 ** 12).
+        """
+        if self.c_semantics or inferred != "int":
+            return inferred
+        if isinstance(value, BinaryOp) and value.operator in ("Mult", "Pow", "LShift"):
+            return "long"
+        if isinstance(value, Constant) and isinstance(value.value, int) and not -2**31 <= value.value < 2**31:
+            return "long"
+        return inferred
+
+    def _deferred_format(self, expr):
+        """printf format for C++'s to_string(x) or a manipulated cout item."""
+
+        kind = self._type_of(expr.args[0]) if expr.args else None
+        if getattr(expr, "to_string", False):
+            # to_string prints a double as %f and a char or bool as a number.
+            return {"double": "%f", "long": "%lld", "String": "%s"}.get(kind, "%d")
+        fixed, precision, width, left = expr.stream
+        flags = ("-" if left else "") + (str(width) if width else "")
+        if kind == "double":
+            if fixed:
+                return f"%{flags}.{6 if precision is None else precision}f"
+            return f"%{flags}.{precision}g" if precision is not None else f"%{flags}g"
+        conversion = {"int": "d", "boolean": "d", "long": "lld", "char": "c", "String": "s"}.get(kind)
+        if conversion is None:
+            # Unresolved yet; a later pass sees the full type information.
+            return "%s"
+        return f"%{flags}{conversion}"
+
     @staticmethod
     def _constant_type(value):
         if isinstance(value, bool):
             return "boolean"
         if isinstance(value, int):
-            return "int"
+            return "int" if -2**31 <= value < 2**31 else "long"
         if isinstance(value, float):
             return "double"
         if isinstance(value, str):

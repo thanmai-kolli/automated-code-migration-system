@@ -152,12 +152,12 @@ with nothing written by hand.
 The scores are predicted by models fitted on **measured migrations**, not on
 hand-written rules. `ml/build_dataset.py` translates every program of `ml/corpus.py` and
 `ml/corpus_extra.json` into the other three languages, compiles and runs both sides on
-the programs' inputs, and records what actually happened — **297 measured translations
-of 46 tasks** in `ml/migration_dataset.csv` (refused translations are excluded).
+the programs' inputs, and records what actually happened — **418 measured translations
+of 57 programs** in `ml/migration_dataset.csv` (refused translations are excluded).
 
 | Model | Predicts | Type |
 | --- | --- | --- |
-| `confidence_model.pkl` | `P(behaviour preserved)` | logistic regression on 4 features |
+| `confidence_model.pkl` | `P(behaviour preserved)` | logistic regression on 25 features |
 | `accuracy_model.pkl` | `behaviour_score`, shown as predicted accuracy | 100 × the same probability |
 | `language_model.pkl` | source language, when the caller omits it | TF-IDF + logistic regression |
 
@@ -168,9 +168,13 @@ one program share a fold — and deploys the lowest Brier score. Results are wri
 
 | grouped CV | deployed | compile status only | prior / mean |
 | --- | --- | --- | --- |
-| confidence — Brier score | **0.016** | 0.023 | 0.069 |
-| confidence — ROC AUC | **0.958** | 0.810 | n/a |
-| accuracy — MAE (points) | **3.88** | 4.61 | 13.78 |
+| confidence — Brier score | **0.014** | 0.014 | 0.048 |
+| confidence — ROC AUC | **0.950** | 0.807 | n/a |
+| accuracy — MAE (points) | 3.24 | **2.84** | 9.59 |
+
+Only 6 of the 403 translations that compile misbehave, so the compile status alone
+already predicts most outcomes: the learned score adds ranking (AUC 0.83 among the
+compiled translations, where the compile status cannot rank at all), not lower error.
 
 ```bash
 cd codeshift-backend
@@ -209,7 +213,7 @@ test cases) instead of the predicted one, next to the model's confidence.
 ## Tests
 
 ```bash
-cd codeshift-backend  && pip install pytest && python -m pytest -q   # 228 tests
+cd codeshift-backend  && pip install pytest && python -m pytest -q   # 237 tests
 cd codeshift-frontend && npm run lint && npm run build
 ```
 
@@ -249,23 +253,29 @@ Each program the engine cannot translate faithfully is **refused** with a reason
 (`Cannot translate this program faithfully: ...`) rather than translated approximately.
 The main gaps, from failures on programs that were never used during development:
 
-- **C as a target** has no growable list or string type: list growth, string building
-  and string methods from Python or Java, and C++ containers, `std::string`, classes and
-  `<iomanip>`, are refused.
+- **C as a target** has no growable list or string type: list growth, string building,
+  string methods and iterating over a string from Python or Java, and C++ containers,
+  `std::string`, classes and `<iomanip>`, are refused.
 - **Refused C and C++ constructs:** `sizeof`, chained assignment, writes into `char`
-  arrays, function-like macros, stream manipulators such as `fixed`, increments inside
-  expressions and fall-through `switch` cases. Array members inside structs are not parsed.
-- **Refused Java and Python constructs:** lambdas, enums, labels, slicing and keyword
-  arguments.
-- **Unmapped library calls** (for example C++ `to_string` and `c_str`, Python
-  `round(x, n)` and character methods such as `ch.isupper()`) still produce code that does
-  not compile or fails at run time.
-- **Integer width:** Python's unbounded integers become 32-bit `int`; larger values
-  overflow silently.
+  arrays, function-like macros, the stream manipulators `scientific`, `setfill` and
+  `boolalpha`, increments inside expressions and fall-through `switch` cases.
+- **Refused Java and Python constructs:** lambdas, enums, labels, slicing with a step
+  other than -1, keyword arguments, and iterating a dictionary into C++ (`std::map` is
+  ordered by key, a Python dict by insertion).
+- **Unmapped library calls** still produce code that does not compile or fails at run
+  time; Python's `None` used as a missing integer is not modelled.
 - Where a Python type cannot be inferred, Java falls back to `Object`; each such decision
   is reported in the semantic findings.
 - Single-file programs that use standard input and output only: no multi-file projects,
   concurrency or framework APIs.
+
+**Library idioms with one defined meaning** (`core/library.py`): Python `round` (ties to
+even) and `round(x, n)`, Java `Math.round`, C `round`; Python slicing, `s[::-1]`,
+`sorted`, `reversed`, `str.join`, `str.isupper()` and friends, `enumerate`, `zip`,
+`dict.items()` and `map(int, input().split())`; Java `StringBuilder`,
+`Collections.reverse`, `Arrays.asList`; C++ `to_string`, `stoi`, `substr`, `reverse`,
+`count`, `string::npos`, `fixed`, `setprecision` and `setw`. Python integers that grow
+(products, powers) become 64-bit, and lists and floats print exactly as Python prints them.
 
 **Handled by lowering rather than mapping** — counting loops become `range` only when
 provably equivalent (otherwise a `while` loop), `switch` becomes an if/else chain,

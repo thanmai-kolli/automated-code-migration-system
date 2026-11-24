@@ -1,9 +1,9 @@
 {
   "dataset": {
-    "rows": 297,
-    "programs": 46,
-    "compiled": 282,
-    "correct": 275,
+    "rows": 418,
+    "programs": 57,
+    "compiled": 403,
+    "correct": 397,
     "features": [
       "compile_success",
       "risk_score",
@@ -36,63 +36,63 @@
     "scheme": "GroupKFold(5) by program"
   },
   "confidence_model": {
-    "chosen": "logistic_regression[compile+library]",
+    "chosen": "logistic_regression[all]",
     "cv": {
       "logistic_regression[all]": {
-        "Brier": 0.0261,
-        "ECE": 0.0138,
-        "accuracy": 0.9663,
-        "ROC_AUC": 0.954,
-        "ROC_AUC_compiled_only": 0.8675
+        "Brier": 0.0137,
+        "ECE": 0.0089,
+        "accuracy": 0.9833,
+        "ROC_AUC": 0.9496,
+        "ROC_AUC_compiled_only": 0.8254
       },
       "random_forest[all]": {
-        "Brier": 0.0336,
-        "ECE": 0.0556,
-        "accuracy": 0.9529,
-        "ROC_AUC": 0.9653,
-        "ROC_AUC_compiled_only": 0.8909
+        "Brier": 0.0248,
+        "ECE": 0.0335,
+        "accuracy": 0.9713,
+        "ROC_AUC": 0.9764,
+        "ROC_AUC_compiled_only": 0.9173
       },
       "random_forest_sigmoid[all]": {
-        "Brier": 0.0284,
-        "ECE": 0.0422,
-        "accuracy": 0.9428,
-        "ROC_AUC": 0.9519,
-        "ROC_AUC_compiled_only": 0.867
+        "Brier": 0.0215,
+        "ECE": 0.0182,
+        "accuracy": 0.9737,
+        "ROC_AUC": 0.9529,
+        "ROC_AUC_compiled_only": 0.843
       },
       "logistic_regression[compile+library]": {
-        "Brier": 0.016,
-        "ECE": 0.0218,
-        "accuracy": 0.9832,
-        "ROC_AUC": 0.9577,
-        "ROC_AUC_compiled_only": 0.867
+        "Brier": 0.0176,
+        "ECE": 0.005,
+        "accuracy": 0.9809,
+        "ROC_AUC": 0.9435,
+        "ROC_AUC_compiled_only": 0.8023
       },
       "random_forest[compile+library]": {
-        "Brier": 0.0288,
-        "ECE": 0.0426,
-        "accuracy": 0.9428,
-        "ROC_AUC": 0.9714,
-        "ROC_AUC_compiled_only": 0.9335
+        "Brier": 0.0213,
+        "ECE": 0.0146,
+        "accuracy": 0.9856,
+        "ROC_AUC": 0.9415,
+        "ROC_AUC_compiled_only": 0.7951
       },
       "random_forest_sigmoid[compile+library]": {
-        "Brier": 0.0355,
-        "ECE": 0.0561,
-        "accuracy": 0.9394,
-        "ROC_AUC": 0.9579,
-        "ROC_AUC_compiled_only": 0.9029
+        "Brier": 0.0237,
+        "ECE": 0.018,
+        "accuracy": 0.9713,
+        "ROC_AUC": 0.9706,
+        "ROC_AUC_compiled_only": 0.9089
       },
       "compile_only (baseline)": {
-        "Brier": 0.023,
-        "ECE": 0.0001,
-        "accuracy": 0.9764,
-        "ROC_AUC": 0.8103,
-        "ROC_AUC_compiled_only": 0.4039
+        "Brier": 0.0142,
+        "ECE": 0.0,
+        "accuracy": 0.9856,
+        "ROC_AUC": 0.8068,
+        "ROC_AUC_compiled_only": 0.3239
       },
       "class_prior (baseline)": {
-        "Brier": 0.0693,
+        "Brier": 0.0482,
         "ECE": 0.0,
-        "accuracy": 0.9259,
-        "ROC_AUC": 0.362,
-        "ROC_AUC_compiled_only": 0.4319
+        "accuracy": 0.9498,
+        "ROC_AUC": 0.3389,
+        "ROC_AUC_compiled_only": 0.3919
       }
     }
   },
@@ -100,32 +100,32 @@
     "chosen": "100 x confidence model",
     "cv": {
       "ridge[all]": {
-        "MAE": 7.046,
-        "R2": 0.685
+        "MAE": 4.686,
+        "R2": 0.69
       },
       "random_forest[all]": {
-        "MAE": 5.486,
-        "R2": 0.625
+        "MAE": 3.377,
+        "R2": 0.7
       },
       "ridge[compile+library]": {
-        "MAE": 5.23,
-        "R2": 0.716
+        "MAE": 3.7,
+        "R2": 0.688
       },
       "random_forest[compile+library]": {
-        "MAE": 5.058,
-        "R2": 0.611
+        "MAE": 3.297,
+        "R2": 0.662
       },
       "compile_only (baseline)": {
-        "MAE": 4.607,
-        "R2": 0.664
+        "MAE": 2.837,
+        "R2": 0.703
       },
       "mean (baseline)": {
-        "MAE": 13.779,
+        "MAE": 9.586,
         "R2": -0.01
       },
       "100 x confidence model": {
-        "MAE": 3.884,
-        "R2": 0.767
+        "MAE": 3.237,
+        "R2": 0.713
       }
     }
   }

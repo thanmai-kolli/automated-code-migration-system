@@ -1,3 +1,4 @@
+from cross_language_system.core import library
 from cross_language_system.core import precedence as prec
 from cross_language_system.core import printf_format
 from cross_language_system.core.errors import UnsupportedConstruct
@@ -161,6 +162,9 @@ class JavaGenerator:
                 "        return index >= 0 && index < text.length() ? text.charAt(index) : '\\0';\n"
                 "    }\n\n"
             )
+        for name, helper in library.JAVA_HELPERS.items():
+            if name in self.helpers:
+                code += helper
         code += members + main + "}\n"
 
         return code
@@ -192,7 +196,8 @@ class JavaGenerator:
         code = f"    public static class {cls.name}{extends} {{\n"
 
         for field in cls.fields:
-            code += f"        private {self._java_type(field.field_type)} {field.name};\n"
+            initializer = f" = {self._generate_expr(field.value)}" if field.value is not None else ""
+            code += f"        private {self._java_type(field.field_type)} {field.name}{initializer};\n"
 
         if cls.fields:
             code += "\n"
@@ -396,6 +401,9 @@ class JavaGenerator:
             return code + f"{tab}}}\n"
 
         if isinstance(stmt, ListAppend):
+            if self._type(stmt.list_obj) == "String":
+                # C++'s s.push_back(c) on a string.
+                return f"{tab}{self._generate_expr(stmt.list_obj)} += {self._generate_expr(stmt.value)};\n"
             return f"{tab}{self._receiver(stmt.list_obj)}.add({self._generate_expr(stmt.value)});\n"
 
         raise UnsupportedConstruct(f"statement {type(stmt).__name__} cannot be written as Java")
@@ -414,7 +422,9 @@ class JavaGenerator:
                 declared = f"Map<{key_type}, {val_type}>"
 
             self.symbol_table.register_variable(stmt.name, declared)
-            code = f"{tab}{declared} {stmt.name} = new HashMap<>();\n"
+            # A Python dict iterates in insertion order, which LinkedHashMap keeps.
+            kind = "LinkedHashMap" if self.source_lang == "python" else "HashMap"
+            code = f"{tab}{declared} {stmt.name} = new {kind}<>();\n"
             for k, v in zip(stmt.value.keys, stmt.value.values):
                 code += f"{tab}{stmt.name}.put({self._generate_expr(k)}, {self._generate_expr(v)});\n"
             return code
@@ -480,11 +490,15 @@ class JavaGenerator:
             if iterable_type == "String":
                 if self.source_lang == "python":
                     # Iterating a Python string yields one-character strings.
-                    iterable = f"{self._receiver(stmt.iterable)}.split(\"\")"
+                    self.helpers.add("pyChars")
+                    iterable = f"pyChars({self._generate_expr(stmt.iterable)})"
                     element_type = "String"
                 else:
                     iterable = f"{self._receiver(stmt.iterable)}.toCharArray()"
                     element_type = "char"
+            elif iterable_type.startswith("Map<"):
+                iterable = f"{self._receiver(stmt.iterable)}.keySet()"
+                element_type = self._fix_java_generics(iterable_type[4:-1].split(",")[0].strip())
             else:
                 iterable = self._generate_expr(stmt.iterable)
                 if iterable_type.startswith(("List<", "Set<")):
@@ -504,8 +518,16 @@ class JavaGenerator:
         if isinstance(target, IndexAccess):
             container = self._type(target.obj) or self.symbol_table.lookup(self._generate_expr(target.obj)) or ""
             method = "put" if container.startswith("Map<") else "set"
-            return f"{self._receiver(target.obj)}.{method}({self._generate_expr(target.index)}, {value})"
+            index = self._generate_expr(target.index) if method == "put" else self._index(target.index)
+            return f"{self._receiver(target.obj)}.{method}({index}, {value})"
         return f"{self._generate_expr(target)} = {value}"
+
+    def _index(self, index):
+        """A list or string position: Java requires an int there."""
+        code = self._generate_expr(index)
+        if self._type(index) == "long":
+            return f"(int) {prec.unary_operand(code, index, LANG)}"
+        return code
 
     def _aug_assign(self, stmt):
 
@@ -596,6 +618,12 @@ class JavaGenerator:
                 return f'({code} ? "True" : "False")'
             if isinstance(expr, Constant) and expr.value is None:
                 return '"None"'
+            if kind == "double":
+                self.helpers.add("pyFloat")
+                return f"pyFloat({code})"
+            if kind and kind.startswith(("List<", "Set<", "Map<")):
+                self.helpers.update(("pyStr", "pyFloat"))
+                return f"pyStr({code})"
 
         if self.source_lang in ("c++", "cpp"):
             if kind == "boolean":
@@ -755,6 +783,8 @@ class JavaGenerator:
         if target in ("str", "String"):
             if self.source_lang == "python" and source == "boolean":
                 return f'({inner} ? "True" : "False")'
+            if self.source_lang == "python" and (source == "double" or (source or "").startswith(("List<", "Set<", "Map<"))):
+                return self._text(expr.value)
             return f"String.valueOf({inner})"
 
         if target == "char":
@@ -775,8 +805,17 @@ class JavaGenerator:
                       "long": "mapToLong(Long::longValue)"}.get(element, "mapToInt(Integer::intValue)")
             return f"{self._receiver(expr.args[0])}.stream().{mapper}.sum()"
 
-        if expr.name in ("sqrt", "pow", "abs", "max", "min", "floor", "ceil"):
+        if expr.name in ("sqrt", "pow", "abs", "max", "min") or expr.name in library.MATH_NAMES:
             return f"Math.{expr.name}({args})"
+
+        library_call = self._library_call(expr)
+        if library_call is not None:
+            return library_call
+
+        if expr.name in library.CHAR_TESTS and len(expr.args) == 1 and self._type(expr.args[0]) != "char":
+            # Python's str tests, which also cover a one-character string.
+            self.helpers.add("pyTests")
+            return f"{library.JAVA_TESTS[expr.name]}({args})"
 
         character = {"isupper": "isUpperCase", "islower": "isLowerCase", "isdigit": "isDigit",
                      "isalpha": "isLetter", "isspace": "isWhitespace", "isalnum": "isLetterOrDigit",
@@ -792,6 +831,43 @@ class JavaGenerator:
             return f"new ArrayList<>(Collections.nCopies({args}, {default}))"
 
         return f"{expr.name}({args})"
+
+    def _library_call(self, expr):
+        """The calls of core/library.py; None for any other name."""
+
+        name = expr.name
+        args = [self._generate_expr(a) for a in expr.args]
+        kind = self._type(expr.args[0]) if expr.args else None
+
+        if name == "round_even":
+            return f"(int) Math.rint({args[0]})"
+        if name == "round_digits":
+            self.helpers.add("pyRound")
+            return f"pyRound({args[0]}, {args[1]})"
+        if name == "round_half_up":
+            return f"Math.round({args[0]})"
+        if name == "round_away":
+            self.helpers.add("cRound")
+            return f"cRound({args[0]})"
+        if name == "slice":
+            self.helpers.add("pySlice")
+            lower = "0" if isinstance(expr.args[1], Constant) and expr.args[1].value is None else args[1]
+            upper = "Integer.MAX_VALUE" if isinstance(expr.args[2], Constant) and expr.args[2].value is None \
+                else args[2]
+            return f"pySlice({args[0]}, {lower}, {upper})"
+        if name == "reversed_copy":
+            if kind == "String":
+                return f"new StringBuilder({args[0]}).reverse().toString()"
+            self.helpers.add("pyReversed")
+            return f"pyReversed({args[0]})"
+        if name == "sorted_copy":
+            if kind == "String":
+                raise UnsupportedConstruct("sorted() over a string")
+            self.helpers.add("pySorted")
+            return f"pySorted({args[0]})"
+        if name == "str_join":
+            return f"String.join({args[0]}, {args[1]})"
+        return None
 
     def _generate_expr(self, expr):
 
@@ -850,7 +926,7 @@ class JavaGenerator:
                 self.helpers.add("charAt")
                 return f"charAt({self._generate_expr(expr.obj)}, {self._generate_expr(expr.index)})"
             container_type = self._type(expr.obj) or self.symbol_table.lookup(self._generate_expr(expr.obj)) or ""
-            index = self._generate_expr(expr.index)
+            index = self._generate_expr(expr.index) if container_type.startswith("Map<") else self._index(expr.index)
             if container_type == "String":
                 char = f"{self._receiver(expr.obj)}.charAt({index})"
                 # Python has no char type: indexing a string gives a string.
@@ -976,6 +1052,11 @@ class JavaGenerator:
                     f'.trim().split("\\\\s+"))'
                 )
 
+            if expr.method == "split" and len(expr.args) == 1 and self.source_lang == "python":
+                # Python splits on the literal text and keeps trailing empty fields.
+                return (f"new ArrayList<>(Arrays.asList({self._receiver(expr.obj)}.split("
+                        f"java.util.regex.Pattern.quote({args}), -1)))")
+
             if expr.method == "remove" and expr.args:
 
                 arg = self._generate_expr(expr.args[0])
@@ -985,6 +1066,27 @@ class JavaGenerator:
 
             if expr.method == "sort" and not expr.args:
                 return f"Collections.sort({self._generate_expr(expr.obj)})"
+
+            receiver = self._receiver(expr.obj)
+            obj_type = self._type(expr.obj) or ""
+            if expr.method == "pop" and len(expr.args) <= 1:
+                if not expr.args:
+                    return f"{receiver}.remove({receiver}.size() - 1)"
+                return f"{receiver}.remove((int) ({args}))"
+            if expr.method == "count" and len(expr.args) == 1:
+                if obj_type == "String":
+                    self.helpers.add("pyCount")
+                    return f"pyCount({self._generate_expr(expr.obj)}, String.valueOf({args}))"
+                return f"Collections.frequency({self._generate_expr(expr.obj)}, {args})"
+            if expr.method == "reverse" and not expr.args:
+                return f"Collections.reverse({self._generate_expr(expr.obj)})"
+            if expr.method == "insert" and len(expr.args) == 2:
+                return f"{receiver}.add({self._generate_expr(expr.args[0])}, {self._generate_expr(expr.args[1])})"
+            if expr.method == "index" and len(expr.args) == 1:
+                return f"{receiver}.indexOf({args})"
+            if expr.method == "clear" and not expr.args and obj_type == "String":
+                # Java strings are immutable: C++'s s.clear() rebinds the name.
+                return f'{self._generate_expr(expr.obj)} = ""'
 
             return f"{self._receiver(expr.obj)}.{java_method}({args})"
 
