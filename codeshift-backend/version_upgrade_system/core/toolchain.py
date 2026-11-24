@@ -138,7 +138,7 @@ class Build:
             source = self._write("program.c" if self.language == "c" else "program.cpp")
             binary = os.path.join(self.directory, "program.exe" if os.name == "nt" else "program")
             flags = [self.std] if self.std else []
-            self._invoke([compiler, *flags, source, "-o", binary])
+            self._invoke([compiler, *flags, source, "-o", binary, "-lm"])
             return [binary]
 
         raise RuntimeError(f"unsupported language: {self.language}")

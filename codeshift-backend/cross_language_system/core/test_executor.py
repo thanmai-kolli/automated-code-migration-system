@@ -154,7 +154,8 @@ class ProgramRunner:
             # Pinned: newer compilers default to C23, which rejects K&R-style C
             # that every older standard accepted.
             standard = "-std=gnu17" if self.language == "c" else "-std=gnu++17"
-            self._compile([compiler, standard, source, "-o", binary])
+            # -lm: on Linux the math functions live in a separate library.
+            self._compile([compiler, standard, source, "-o", binary, "-lm"])
             return [os.path.join(self.directory, binary)]
 
         raise RuntimeError(f"cannot execute language: {self.language}")
