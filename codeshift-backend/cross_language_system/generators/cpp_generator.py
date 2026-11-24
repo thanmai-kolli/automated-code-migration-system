@@ -99,6 +99,8 @@ class CppGenerator(CFamilyGenerator):
         text = body + helpers
         code = "#include <iostream>\n#include <string>\n#include <vector>\n#include <map>\n"
 
+        if re.search(r"\bset<", text):
+            code += "#include <set>\n"
         if "_split(" in text:
             code += "#include <sstream>\n"
         if re.search(r"\b(printf|snprintf|vsnprintf)\(", text):
@@ -496,6 +498,7 @@ class CppGenerator(CFamilyGenerator):
     def _convert_text(self, program):
 
         self.converted_allocations = set()
+        self.char_names = _char_names("\n".join(n.body for n in program.body))
         code = "".join(self._convert_block(n.body) for n in program.body)
 
         # Anything still calling the C stdio functions needs their header.
@@ -620,6 +623,12 @@ class CppGenerator(CFamilyGenerator):
                 result += ' << "%"'
             else:
                 argument = arguments[index]
+                # A character constant is an int in C but a char in C++, and cout
+                # prints a char as a character, so %d of a char needs a cast.
+                base = re.match(r"\w+", argument)
+                if piece["conv"] in "di" and (re.fullmatch(r"'(\\.|[^'\\])'", argument)
+                                              or (base and base.group(0) in getattr(self, "char_names", ()))):
+                    argument = f"int({argument})"
                 # << binds tighter than &, |, ^, comparisons and ?:.
                 if not re.fullmatch(r"[\w.]+(\[[^\]]*\])*(\([^()]*\))?", argument):
                     argument = f"({argument})"
@@ -648,6 +657,18 @@ class CppGenerator(CFamilyGenerator):
 
         targets = [a.lstrip("&").strip() for a in arguments]
         return "cin >> " + " >> ".join(targets) + ";"
+
+
+def _char_names(code):
+    """Names declared with a char type (scalars, arrays and pointers)."""
+
+    names = set()
+    for match in re.finditer(r"\b(?:(?:un)?signed\s+)?char\s+([^;(){}]+);", code):
+        for declarator in _split_arguments(match.group(1)):
+            name = re.match(r"[\s*]*(\w+)", declarator)
+            if name:
+                names.add(name.group(1))
+    return names
 
 
 def _split_arguments(text):

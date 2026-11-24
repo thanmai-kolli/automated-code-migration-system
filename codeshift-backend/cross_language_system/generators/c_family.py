@@ -210,6 +210,7 @@ class CFamilyGenerator:
 
         self.helpers = set()
         self.class_names = {n.name for n in program.body if isinstance(n, Class)}
+        self.user_functions = library.user_functions(program)
 
         # A class must be declared before code that uses it, and only the class
         # holding the entry point uses the others.
@@ -649,12 +650,20 @@ class CFamilyGenerator:
 
     def call(self, node):
 
+        user_functions = getattr(self, "user_functions", ())
+        if library.is_user_call(node, user_functions):
+            return f"{node.name}({', '.join(self.expr(a) for a in node.args)})"
+
         library_call = self.library_call(node)
         if library_call is not None:
             return library_call
 
         args = ", ".join(self.expr(a) for a in node.args)
         name = node.name
+
+        if name in user_functions and self.cpp:
+            # The program's own function of this name would hide the library's.
+            return f"std::{name}({args})"
 
         if name == "range_array":
             raise UnsupportedConstruct("an array allocation outside a declaration")
@@ -771,6 +780,8 @@ class CFamilyGenerator:
                 return f"{obj}.{node.method}({args})" if not isinstance(node.obj, SelfRef) \
                     else f"this->{node.method}({args})"
             # Java collection calls have operator or member equivalents in C++.
+            if node.method == "add" and (self._type(node.obj) or "").startswith("Set<"):
+                return f"{obj}.insert({args})"
             if node.method in ("add", "append", "push_back"):
                 return f"{obj}.push_back({args})"
             if node.method == "get" and len(node.args) == 1:
@@ -894,8 +905,11 @@ class CFamilyGenerator:
         if isinstance(stmt, ListAppend):
             target = self.receiver(stmt.list_obj)
             if self.cpp:
-                if self._type(stmt.list_obj) == "String":
+                kind = self._type(stmt.list_obj) or ""
+                if kind == "String":
                     return f"{tab}{target} += {self.expr(stmt.value)};\n"
+                if kind.startswith("Set<"):
+                    return f"{tab}{target}.insert({self.expr(stmt.value)});\n"
                 return f"{tab}{target}.push_back({self.expr(stmt.value)});\n"
             raise UnsupportedConstruct("growing a list in C (arrays have a fixed size)")
 
@@ -970,6 +984,8 @@ class CFamilyGenerator:
         elif self.cpp:
             if (self._type(stmt.iterable) or "").startswith("Map<"):
                 raise UnsupportedConstruct("iterating a map in C++ (std::map visits keys in sorted order)")
+            if self.source == "python" and (self._type(stmt.iterable) or "").startswith("Set<"):
+                raise UnsupportedConstruct("iterating a set in C++ (std::set visits elements in sorted order)")
             if self.source == "python" and self._type(stmt.iterable) == "String":
                 # A Python string yields one-character strings, not chars.
                 code = (f"{tab}for (char _c_{stmt.iterator} : {self.expr(stmt.iterable)}) {{\n"

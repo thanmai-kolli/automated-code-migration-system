@@ -84,8 +84,8 @@ class ListAppend:
         self.value = value
 
 class SetLiteral:
-    def __init__(self, elements):
-        self.elements = elements
+    def __init__(self, elements=()):
+        self.elements = list(elements)
 
 class DictPut:
     def __init__(self, dictionary, key, value):

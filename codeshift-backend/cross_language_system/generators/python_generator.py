@@ -143,6 +143,7 @@ class PythonGenerator:
         self.current_class = None
         self.in_static = True
         self.class_names = {n.name for n in program.body if isinstance(n, Class)}
+        self.user_functions = library.user_functions(program)
 
         blocks = []
         main_statements = []
@@ -565,6 +566,26 @@ class PythonGenerator:
                 return f"[[{element}] * {columns} for _ in range({rows})]"
             raise UnsupportedConstruct("arrays with more than two dimensions")
 
+        if not library.is_user_call(expr, getattr(self, "user_functions", ())):
+            mapped = self._mapped_call(expr, args)
+            if mapped is not None:
+                return mapped
+
+        # A sibling method called without a receiver, as Java allows.
+        if self.current_class is not None and "." not in name:
+            for method in self.current_class.methods:
+                if method.name == name and not method.is_constructor:
+                    if method.is_static or self.in_static:
+                        return f"{self.current_class.name}.{name}({args})"
+                    return f"self.{name}({args})"
+
+        return f"{name}({args})"
+
+    def _mapped_call(self, expr, args):
+        """A call of a library or builtin function; None for any other call."""
+
+        name = expr.name
+
         if name in ("sqrt", "pow"):
             self.uses_math = True
             return f"math.{name}({args})"
@@ -585,15 +606,7 @@ class PythonGenerator:
         if name in ("System.out.println", "System.out.print"):
             return f"print({args})"
 
-        # A sibling method called without a receiver, as Java allows.
-        if self.current_class is not None and "." not in name:
-            for method in self.current_class.methods:
-                if method.name == name and not method.is_constructor:
-                    if method.is_static or self.in_static:
-                        return f"{self.current_class.name}.{name}({args})"
-                    return f"self.{name}({args})"
-
-        return f"{name}({args})"
+        return None
 
     def _library_call(self, expr):
         """The calls of core/library.py; None for any other name."""
@@ -664,6 +677,12 @@ class PythonGenerator:
         if isinstance(expr, FormatString):
             fmt = printf_format.to_python(expr.fmt)
             args = [self._generate_expr(a) for a in expr.args]
+            # A char is a one-letter string in Python; %d of it prints its code.
+            specs = [p for p in printf_format.tokens(expr.fmt) if isinstance(p, dict) and p["conv"] != "%"]
+            if len(specs) == len(args):
+                args = [f"ord({code})" if spec["conv"] in "dioxXu"
+                        and getattr(arg, "inferred_type", None) in ("char", "String") else code
+                        for spec, arg, code in zip(specs, expr.args, args)]
             if len(args) == 1:
                 return f"{fmt!r} % ({args[0]},)"
             return f"{fmt!r} % ({', '.join(args)})"

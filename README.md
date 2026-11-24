@@ -213,7 +213,7 @@ test cases) instead of the predicted one, next to the model's confidence.
 ## Tests
 
 ```bash
-cd codeshift-backend  && pip install pytest && python -m pytest -q   # 237 tests
+cd codeshift-backend  && pip install pytest && python -m pytest -q   # 246 tests
 cd codeshift-frontend && npm run lint && npm run build
 ```
 
@@ -251,19 +251,27 @@ codeshift-frontend/src/       pages, components, services, utils, styles
 
 Each program the engine cannot translate faithfully is **refused** with a reason
 (`Cannot translate this program faithfully: ...`) rather than translated approximately.
-The main gaps, from failures on programs that were never used during development:
+On 108 programs written by independent authors for [Rosetta Code](https://rosettacode.org)
+(324 translations, none seen during development), 29.6% were translated correctly, 44%
+were refused with an explanation and 1.9% were silently wrong. The main gaps:
 
 - **C as a target** has no growable list or string type: list growth, string building,
   string methods and iterating over a string from Python or Java, and C++ containers,
   `std::string`, classes and `<iomanip>`, are refused.
-- **Refused C and C++ constructs:** `sizeof`, chained assignment, writes into `char`
-  arrays, function-like macros, the stream manipulators `scientific`, `setfill` and
-  `boolalpha`, increments inside expressions and fall-through `switch` cases.
-- **Refused Java and Python constructs:** lambdas, enums, labels, slicing with a step
-  other than -1, keyword arguments, and iterating a dictionary into C++ (`std::map` is
-  ordered by key, a Python dict by insertion).
-- **Unmapped library calls** still produce code that does not compile or fails at run
-  time; Python's `None` used as a missing integer is not modelled.
+- **Refused C and C++ constructs:** `sizeof`, pointer dereference, templates, chained
+  assignment, writes into `char` arrays, function-like macros, the stream manipulators
+  `scientific`, `setfill` and `boolalpha`, increments inside expressions and fall-through
+  `switch` cases.
+- **Refused Java and Python constructs:** lambdas and method references, enums, labels,
+  generator expressions and comprehensions inside expressions, slicing with a step other
+  than -1, keyword arguments, and iterating a dictionary or set into C++ (`std::map` and
+  `std::set` are ordered by key, Python's by insertion or hash).
+- **Unmapped library calls** (for example `sys.stdout.write`) and list repetition such as
+  `[False] * 100` still produce code that does not compile; Python's `None` used as a
+  missing integer is not modelled.
+- **Numeric formats:** C/C++ `unsigned` arithmetic wraps around, Python's and Java's
+  integers do not; Java prints doubles of 10^7 and more in scientific notation
+  (`1.0E7`), which the other targets do not reproduce.
 - Where a Python type cannot be inferred, Java falls back to `Object`; each such decision
   is reported in the semantic findings.
 - Single-file programs that use standard input and output only: no multi-file projects,

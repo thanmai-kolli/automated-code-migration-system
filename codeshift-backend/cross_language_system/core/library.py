@@ -42,6 +42,29 @@ def result_type(name, arg_types):
     return None
 
 
+def user_functions(program):
+    """Names of the functions and methods a program defines."""
+
+    names = set()
+    for node in program.body:
+        if type(node).__name__ == "Function":
+            names.add(node.name)
+        elif type(node).__name__ == "Class":
+            names.update(method.name for method in node.methods)
+    return names
+
+
+def is_user_call(call, names):
+    """True when call reaches a function of the program, not a library function.
+
+    A function the program defines shadows a library function of the same
+    name (C's max, a Java method pow), unless the parser marked the call as a
+    qualified library call (Java's Math.pow, Python's math.pow).
+    """
+
+    return call.name in names and not getattr(call, "library", False)
+
+
 JAVA_HELPERS = {
     "pyFloat": (
         "    static String pyFloat(double x) {\n"

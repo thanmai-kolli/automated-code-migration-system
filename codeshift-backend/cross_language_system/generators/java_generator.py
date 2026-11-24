@@ -116,6 +116,7 @@ class JavaGenerator:
         self.function_returns = {}
         self.current_class = None
         self.class_names = {n.name for n in program.body if isinstance(n, Class)}
+        self.user_functions = library.user_functions(program)
 
         members = ""
         function_names = []
@@ -795,6 +796,9 @@ class JavaGenerator:
     def _call(self, expr):
 
         args = ", ".join(self._generate_expr(a) for a in expr.args)
+
+        if library.is_user_call(expr, getattr(self, "user_functions", ())):
+            return f"{expr.name}({args})"
 
         if expr.name in ("min", "max") and len(expr.args) == 1:
             return f"Collections.{expr.name}({args})"

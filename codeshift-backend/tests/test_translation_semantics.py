@@ -534,6 +534,87 @@ class TestLibraryIdioms:
 
 
 # ---------------------------------------------------------------------------
+# Defects found on external programs (Rosetta Code)
+# ---------------------------------------------------------------------------
+
+C_CHAR_CODES = """#include <stdio.h>
+int main() {
+  char c = 'b';
+  char word[8] = "hi";
+  printf("%d\\n", 'a');
+  printf("%d %c\\n", c, c);
+  printf("%d\\n", word[1]);
+  printf("%c\\n", 97);
+  return 0;
+}
+"""
+
+CPP_UNSIGNED = """#include <iostream>
+int main() {
+    unsigned int a = 1, b = 1;
+    for (unsigned int n = 3; n <= 48; ++n) {
+        unsigned int fib = a + b;
+        a = b;
+        b = fib;
+    }
+    unsigned long long big = 18000000000000000000ull;
+    std::cout << b << " " << a + b << " " << big << std::endl;
+    return 0;
+}
+"""
+
+JAVA_OWN_POW = """public class Exp {
+    public static void main(String[] args) {
+        System.out.println(pow(2, 3));
+        System.out.println(Math.pow(2, 3));
+    }
+    public static double pow(double base, int exp) {
+        double ans = 1.0;
+        for (; exp > 0; --exp) ans *= base;
+        return ans + 1;
+    }
+}
+"""
+
+C_OWN_MAX = """#include <stdio.h>
+int max(int a, int b) { return a > b ? a + 100 : b + 100; }
+int main() {
+    printf("%d\\n", max(3, 4));
+    return 0;
+}
+"""
+
+PY_EMPTY_SET = """seen = set()
+seen.add(3)
+seen.add(3)
+print(len(seen))
+"""
+
+
+class TestExternalDefects:
+
+    @pytest.mark.parametrize("target", directions("c", ["c++", "python"]))
+    def test_char_printed_with_d_is_its_code(self, target):
+        behaves_the_same(C_CHAR_CODES, "c", target)
+
+    @pytest.mark.parametrize("target", directions("c++", ["c"]))
+    def test_unsigned_values_keep_their_format(self, target):
+        behaves_the_same(CPP_UNSIGNED, "c++", target)
+
+    @pytest.mark.parametrize("target", directions("java", ["python", "c++"]))
+    def test_own_method_named_like_a_library_function(self, target):
+        behaves_the_same(JAVA_OWN_POW, "java", target)
+
+    @pytest.mark.parametrize("target", directions("c", ["python", "java"]))
+    def test_own_function_shadows_the_library(self, target):
+        behaves_the_same(C_OWN_MAX, "c", target)
+
+    @pytest.mark.parametrize("target", directions("python", ["java", "c++"]))
+    def test_empty_set_does_not_crash(self, target):
+        behaves_the_same(PY_EMPTY_SET, "python", target)
+
+
+# ---------------------------------------------------------------------------
 # Refusals: what cannot be translated faithfully must say so
 # ---------------------------------------------------------------------------
 

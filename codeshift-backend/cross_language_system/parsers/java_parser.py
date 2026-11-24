@@ -605,6 +605,14 @@ class JavaParser:
 
     def _invocation(self, expr):
 
+        node = self._invocation_node(expr)
+        if expr.qualifier and isinstance(node, FunctionCall):
+            # Math.pow is the library's even where the class defines its own pow.
+            node.library = True
+        return node
+
+    def _invocation_node(self, expr):
+
         args = [self._handle_expression(a) for a in expr.arguments or []]
         qualifier = expr.qualifier
 

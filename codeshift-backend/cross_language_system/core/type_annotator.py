@@ -556,6 +556,8 @@ class TypeAnnotator:
                 current = scope.get(stmt.list_obj.name)
                 if not current or current in (UNKNOWN, "List<Object>"):
                     scope.set(stmt.list_obj.name, f"List<{element}>")
+                elif current == "Set<Object>":
+                    scope.set(stmt.list_obj.name, f"Set<{element}>")
             else:
                 self.infer(stmt.value, scope)
 
@@ -721,8 +723,10 @@ class TypeAnnotator:
 
         if isinstance(expr, FunctionCall):
             arg_types = [self.infer(a, scope) for a in expr.args]
-            self._record_call(expr.name, arg_types)
-            if expr.name in self.functions:
+            library_call = getattr(expr, "library", False)
+            if not library_call:
+                self._record_call(expr.name, arg_types)
+            if expr.name in self.functions and not library_call:
                 return self.functions[expr.name]
             library_type = library.result_type(expr.name, arg_types)
             if library_type is not None:
@@ -763,6 +767,10 @@ class TypeAnnotator:
                 return "int"
             if expr.method == "pop":
                 return self._element_type(obj_type)
+            if (expr.method == "add" and obj_type == "Set<Object>" and len(arg_types) == 1
+                    and isinstance(expr.obj, Identifier) and arg_types[0] != UNKNOWN):
+                # s = set(); s.add(3) makes s a set of integers.
+                scope.set(expr.obj.name, f"Set<{self._boxed(arg_types[0])}>")
             return UNKNOWN
 
         if isinstance(expr, IndexAccess):

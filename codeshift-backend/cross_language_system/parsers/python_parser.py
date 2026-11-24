@@ -26,6 +26,8 @@ class PythonParser:
 
     def parse(self, code):
         tree = ast.parse(code)
+        # A module-level function shadows the builtin of the same name.
+        self._defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
         return self._build_ir(tree)
 
     def _build_ir(self, tree):
@@ -729,6 +731,9 @@ class PythonParser:
 
             name = node.func.id
 
+            if name in getattr(self, "_defined", ()):
+                return FunctionCall(name, args)
+
             if name == "print":
                 _refuse(node, "print() used as a value")
 
@@ -785,9 +790,11 @@ class PythonParser:
                 and method in MATH_FUNCTIONS
             ):
                 # Python's math.floor and math.ceil return an int, C's and Java's a double.
+                call = FunctionCall(method, args)
+                call.library = True
                 if method in ("floor", "ceil"):
-                    return TypeCast("int", FunctionCall(method, args))
-                return FunctionCall(method, args)
+                    return TypeCast("int", call)
+                return call
 
             # "{} and {}".format(a, b) is an f-string written the old way.
             if (

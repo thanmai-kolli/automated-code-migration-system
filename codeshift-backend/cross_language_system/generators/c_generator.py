@@ -12,8 +12,22 @@ CPP_ONLY_HEADERS = ("vector", "string", "map", "set", "iomanip", "algorithm", "s
 
 CPP_SCALARS = {
     "int": "%d", "short": "%d", "unsigned": "%u", "long": "%ld", "long long": "%lld",
+    "unsigned long": "%lu", "unsigned long long": "%llu", "unsigned short": "%u", "unsigned char": "%c",
     "double": "%g", "float": "%g", "char": "%c", "bool": "%d",
 }
+# The scalar type names a C++ declaration can start with, longest first.
+SCALAR_TYPE = (r"unsigned\s+long\s+long(?:\s+int)?|unsigned\s+long(?:\s+int)?|unsigned\s+short(?:\s+int)?|"
+               r"unsigned\s+char|unsigned\s+int|unsigned|long\s+long(?:\s+int)?|long(?:\s+int)?|"
+               r"short(?:\s+int)?|int|double|float|char|bool")
+
+
+def _scalar_name(declared):
+    """'unsigned  long int' -> 'unsigned long', the keys of CPP_SCALARS."""
+
+    name = re.sub(r"\s+", " ", declared).strip()
+    if name != "int":
+        name = re.sub(r" int$", "", name)
+    return "unsigned" if name == "unsigned int" else name
 
 # Reads that can stand inside an expression, emitted only when used.
 READ_HELPERS = {
@@ -404,16 +418,13 @@ class CGenerator(CFamilyGenerator):
         """name -> C++ scalar type, from declarations and function signatures."""
 
         types = {}
-        pattern = re.compile(
-            r"\b(unsigned\s+long\s+long|long\s+long|unsigned|long|short|int|double|float|char|bool)"
-            r"\s+(\w+)\s*(?=[=;,)\[(])"
-        )
+        pattern = re.compile(r"\b(" + SCALAR_TYPE + r")\s+(\w+)\s*(?=[=;,)\[(])")
         for match in pattern.finditer(source):
-            types[match.group(2)] = re.sub(r"\s+", " ", match.group(1)).replace("unsigned long long", "long long")
+            types[match.group(2)] = _scalar_name(match.group(1))
         # A declaration list "int a, b, c;" names every variable after the first too.
-        for match in re.finditer(r"\b(int|double|float|char|bool|long long|long)\s+([^;(){}]+);", source):
+        for match in re.finditer(r"\b(" + SCALAR_TYPE + r")\s+([^;(){}]+);", source):
             for name in re.findall(r"(?:^|,)\s*(\w+)", match.group(2)):
-                types.setdefault(name, match.group(1))
+                types.setdefault(name, _scalar_name(match.group(1)))
         return types
 
     def _convert_block(self, text):
@@ -502,10 +513,11 @@ class CGenerator(CFamilyGenerator):
                     raise UnsupportedConstruct(f"the type of '{part}' could not be determined for printf")
                 if kinds & {"double", "float"}:
                     spec = "%g"
-                elif "long long" in kinds:
-                    spec = "%lld"
                 else:
-                    spec = "%d"
+                    # The usual arithmetic conversions: the widest type wins, and
+                    # unsigned wins over signed of the same width.
+                    spec = next((CPP_SCALARS[k] for k in ("unsigned long long", "long long", "unsigned long",
+                                                          "long", "unsigned") if k in kinds), "%d")
                 fmt += spec
                 values.append(part)
 
