@@ -346,6 +346,9 @@ class CppGenerator(CFamilyGenerator):
             element = self.type_of(getattr(node, "element_type", None) or "int")
             if element == "auto":
                 element = "int"
+            fill = getattr(node, "fill", None)
+            if fill is not None:
+                return f"vector<{element}>({self.expr(node.args[0])}, {self.expr(fill)})"
             return f"vector<{element}>({self.expr(node.args[0])})"
         if node.name in ("min", "max", "sum") and len(node.args) == 1:
             container = prec.postfix_operand(self.expr(node.args[0]), node.args[0], LANG)
@@ -516,6 +519,7 @@ class CppGenerator(CFamilyGenerator):
         # ------------------------------
         # Headers conversion
         # ------------------------------
+        code = re.sub(r"#[ \t]*include[ \t]*<", "#include <", code)
         code = code.replace("<stdio.h>", "<iostream>")
         code = code.replace("<stdlib.h>", "<cstdlib>")
         code = code.replace("<string.h>", "<cstring>")
@@ -527,6 +531,8 @@ class CppGenerator(CFamilyGenerator):
                 "#include <iostream>",
                 "#include <iostream>\nusing namespace std;"
             )
+
+        code = _cast_allocations(code)
 
         # ------------------------------
         # printf → cout, only where cout prints exactly the same text
@@ -596,6 +602,10 @@ class CppGenerator(CFamilyGenerator):
     # -----------------------------------------
     def _convert_printf(self, match):
 
+        if not _statement_start(match.string, match.start()):
+            # printf inside an expression returns a count; cout << would not.
+            return match.group(0)
+
         format_string = match.group(1)
         arguments = _split_arguments(match.group(2)[1:]) if match.group(2).strip() else []
 
@@ -657,6 +667,44 @@ class CppGenerator(CFamilyGenerator):
 
         targets = [a.lstrip("&").strip() for a in arguments]
         return "cin >> " + " >> ".join(targets) + ";"
+
+
+def _statement_start(code, index):
+    """True when the text at index begins a statement rather than sits inside an expression."""
+
+    before = code[:index].rstrip()
+    if not before or before[-1] in ";{})":
+        return True
+    if re.search(r"\b(else|do)$", before):
+        return True
+    return before[-1] == ":" and bool(re.search(r"(\bcase\b[^;{}?]*|\bdefault\s*|^\s*\w+\s*):$", before, re.M))
+
+
+_ALLOCATION = r"(malloc|calloc|realloc)\s*\("
+_POINTER_TYPE = r"\b((?:(?:unsigned|signed|const|struct)\s+)*[A-Za-z_]\w*)\s*(\*+)\s*"
+
+
+def _without_const(type_name):
+    return re.sub(r"\bconst\s+", "", type_name)
+
+
+def _cast_allocations(code):
+    """C converts malloc's void* implicitly; C++ needs a cast: int *a = (int *) malloc(...)."""
+
+    pointers = {m.group(3): (_without_const(m.group(1)), m.group(2))
+                for m in re.finditer(_POINTER_TYPE + r"(\w+)\s*(?=[=;,)\[])", code)}
+    code = re.sub(_POINTER_TYPE + r"(\w+)\s*=\s*" + _ALLOCATION,
+                  lambda m: f"{m.group(1)} {m.group(2)}{m.group(3)} = "
+                            f"({_without_const(m.group(1))} {m.group(2)}) {m.group(4)}(", code)
+
+    def assignment(match):
+        name = match.group(2)
+        if name not in pointers:
+            return match.group(0)
+        base, stars = pointers[name]
+        return f"{match.group(1)}{name} = ({base} {stars}) {match.group(3)}("
+
+    return re.sub(r"(^|[;{}\s])(\w+)\s*=\s*" + _ALLOCATION, assignment, code)
 
 
 def _char_names(code):

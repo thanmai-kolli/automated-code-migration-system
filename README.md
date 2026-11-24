@@ -152,29 +152,31 @@ with nothing written by hand.
 The scores are predicted by models fitted on **measured migrations**, not on
 hand-written rules. `ml/build_dataset.py` translates every program of `ml/corpus.py` and
 `ml/corpus_extra.json` into the other three languages, compiles and runs both sides on
-the programs' inputs, and records what actually happened — **418 measured translations
-of 57 programs** in `ml/migration_dataset.csv` (refused translations are excluded).
+the programs' inputs, and records what actually happened — **420 measured translations
+of 58 programs** in `ml/migration_dataset.csv` (refused translations are excluded).
 
 | Model | Predicts | Type |
 | --- | --- | --- |
-| `confidence_model.pkl` | `P(behaviour preserved)` | logistic regression on 25 features |
-| `accuracy_model.pkl` | `behaviour_score`, shown as predicted accuracy | 100 × the same probability |
+| `confidence_model.pkl` | `P(behaviour preserved)` | sigmoid-calibrated random forest on 25 features |
+| `accuracy_model.pkl` | `behaviour_score`, shown as predicted accuracy | random forest regressor on 4 features |
 | `language_model.pkl` | source language, when the caller omits it | TF-IDF + logistic regression |
 
 `train_models.py` compares logistic regression, a random forest and a calibrated random
-forest on all 25 features and on a 4-feature subset with grouped 5-fold CV — all rows for
-one program share a fold — and deploys the lowest Brier score. Results are written to
+forest on all 25 features and on a 4-feature subset (compile status, library calls,
+classes, collection operations) with grouped 5-fold CV — all rows for one program share a
+fold — and deploys the lowest Brier score; for the accuracy it deploys the lowest MAE among
+ridge and random-forest regressors and 100 × the probability. Results are written to
 `ml/model_card.json`:
 
 | grouped CV | deployed | compile status only | prior / mean |
 | --- | --- | --- | --- |
-| confidence — Brier score | **0.014** | 0.014 | 0.048 |
-| confidence — ROC AUC | **0.950** | 0.807 | n/a |
-| accuracy — MAE (points) | 3.24 | **2.84** | 9.59 |
+| confidence — Brier score | 0.0215 | **0.0164** | 0.0498 |
+| confidence — ROC AUC | **0.955** | 0.812 | n/a |
+| accuracy — MAE (points) | 3.97 | **3.28** | 9.94 |
 
-Only 6 of the 403 translations that compile misbehave, so the compile status alone
-already predicts most outcomes: the learned score adds ranking (AUC 0.83 among the
-compiled translations, where the compile status cannot rank at all), not lower error.
+Only 7 of the 405 translations that compile misbehave, so the compile status alone
+has the lowest error: the learned score adds ranking (AUC 0.86 among the compiled
+translations, where the compile status cannot rank at all), not lower error.
 
 ```bash
 cd codeshift-backend
@@ -213,7 +215,7 @@ test cases) instead of the predicted one, next to the model's confidence.
 ## Tests
 
 ```bash
-cd codeshift-backend  && pip install pytest && python -m pytest -q   # 246 tests
+cd codeshift-backend  && pip install pytest && python -m pytest -q   # 258 tests
 cd codeshift-frontend && npm run lint && npm run build
 ```
 

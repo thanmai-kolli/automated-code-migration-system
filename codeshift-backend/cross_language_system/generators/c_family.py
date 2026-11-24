@@ -7,6 +7,7 @@ language so every source/target pair is covered.
 """
 
 from cross_language_system.core import library
+from cross_language_system.core import naming
 from cross_language_system.core import precedence as prec
 from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
@@ -208,6 +209,9 @@ class CFamilyGenerator:
 
     def generate_from_ir(self, program):
 
+        # A Python function called main is an ordinary function; C's main runs the module.
+        naming.rename_reserved(program, "c++" if self.cpp else "c",
+                               extra=("main",) if self.source == "python" else ())
         self.helpers = set()
         self.class_names = {n.name for n in program.body if isinstance(n, Class)}
         self.user_functions = library.user_functions(program)
@@ -229,10 +233,23 @@ class CFamilyGenerator:
         for cls in classes:
             body += self.render_class(cls)
 
-        for func in functions:
-            if func.name == "main":
-                continue
-            body += self.render_function(func)
+        if self.source == "python":
+            for name, variable in library.module_globals(program).items():
+                if not self.cpp and str(variable.var_type).startswith(("List<", "Set<", "Map<")):
+                    raise UnsupportedConstruct("a module-level list read by functions in C")
+                rendered_type = self.type_of(variable.var_type)
+                body += f"{rendered_type} {name};\n"
+                self.scope[name] = rendered_type
+            body += "\n" if body.endswith(";\n") else ""
+
+        rendered = [(func, self.render_function(func)) for func in functions if func.name != "main"]
+        # Prototypes let functions call each other in any order, as Python and Java allow.
+        prototypes = "".join(text[:text.index("{")].rstrip() + ";\n"
+                             for func, text in rendered if not func.defaults and "{" in text)
+        if len(rendered) > 1 and prototypes:
+            body += prototypes + "\n"
+        for _, text in rendered:
+            body += text
 
         user_main = next((f for f in functions if f.name == "main"), None)
 
@@ -575,6 +592,13 @@ class CFamilyGenerator:
 
         if op == "Add" and self._type(node) == "String":
             return self.concatenate(node)
+
+        if op == "Mult" and "String" in (left_type, right_type) and self.source == "python":
+            if not self.cpp:
+                raise UnsupportedConstruct("repeating a string in C")
+            text, count = (node.left, node.right) if left_type == "String" else (node.right, node.left)
+            self.helpers.add("lib_repeat")
+            return f"_repeat({self.expr(text)}, {self.expr(count)})"
 
         if op not in ARITHMETIC:
             raise UnsupportedConstruct(f"operator {op} cannot be written as C/C++")
@@ -991,7 +1015,11 @@ class CFamilyGenerator:
                 code = (f"{tab}for (char _c_{stmt.iterator} : {self.expr(stmt.iterable)}) {{\n"
                         f"{tab}    string {stmt.iterator}(1, _c_{stmt.iterator});\n")
             else:
-                code = f"{tab}for (auto {stmt.iterator} : {self.expr(stmt.iterable)}) {{\n"
+                iterable = self.expr(stmt.iterable)
+                if isinstance(stmt.iterable, ArrayLiteral) and (self._type(stmt.iterable) or "").startswith("List<"):
+                    # A braced list has no type of its own in a range-for.
+                    iterable = f"{self.type_of(self._type(stmt.iterable))}{iterable}"
+                code = f"{tab}for (auto {stmt.iterator} : {iterable}) {{\n"
         else:
             if self._type(stmt.iterable) == "String":
                 raise UnsupportedConstruct("iterating over the characters of a string in C")

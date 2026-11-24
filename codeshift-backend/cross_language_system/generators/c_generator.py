@@ -127,6 +127,15 @@ class CGenerator(CFamilyGenerator):
             size = self.expr(stmt.value.args[0])
             self.scope[stmt.name] = f"{element}*"
             self.array_lengths.add(stmt.name)
+            fill = getattr(stmt.value, "fill", None)
+            if fill is not None:
+                if element == "char*":
+                    raise UnsupportedConstruct("an array of strings in C")
+                return (
+                    f"{tab}int {stmt.name}_length = {size};\n"
+                    f"{tab}{element} {stmt.name}[{stmt.name}_length];\n"
+                    f"{tab}for (int _k = 0; _k < {stmt.name}_length; _k++) {stmt.name}[_k] = {self.expr(fill)};\n"
+                )
             return (
                 f"{tab}int {stmt.name}_length = {size};\n"
                 f"{tab}{element} {stmt.name}[{stmt.name}_length];\n"

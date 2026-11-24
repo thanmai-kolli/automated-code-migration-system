@@ -54,6 +54,31 @@ def user_functions(program):
     return names
 
 
+def module_globals(program):
+    """Top-level variables of a Python module that its functions read, by name.
+
+    Python functions see module variables; a Java static method or a C
+    function sees only fields and globals, so these must be declared there.
+    A function that assigns the name has a local of its own instead.
+    """
+
+    from cross_language_system.core.naming import walk
+
+    top = {}
+    for node in program.body:
+        if type(node).__name__ == "Variable" and node.name not in top:
+            top[node.name] = node
+    functions = [n for n in program.body if type(n).__name__ == "Function"]
+    functions += [m for n in program.body if type(n).__name__ == "Class" for m in n.methods]
+    used = set()
+    for function in functions:
+        nodes = list(walk(function.body))
+        local = {n.name for n in nodes if type(n).__name__ == "Variable"} | set(function.params)
+        local |= {n.iterator for n in nodes if type(n).__name__ == "ForLoop" and isinstance(n.iterator, str)}
+        used |= {n.name for n in nodes if type(n).__name__ == "Identifier" and n.name in top and n.name not in local}
+    return {name: node for name, node in top.items() if name in used}
+
+
 def is_user_call(call, names):
     """True when call reaches a function of the program, not a library function.
 
@@ -66,6 +91,14 @@ def is_user_call(call, names):
 
 
 JAVA_HELPERS = {
+    "pySum": (
+        "    static double pySum(List<Double> xs) {\n"
+        "        // Left to right, as Python adds; DoubleStream.sum compensates rounding.\n"
+        "        double total = 0.0;\n"
+        "        for (double x : xs) total += x;\n"
+        "        return total;\n"
+        "    }\n"
+    ),
     "pyFloat": (
         "    static String pyFloat(double x) {\n"
         "        // Python's repr: the shortest digits that read back as x.\n"
@@ -226,6 +259,14 @@ JAVA_TESTS = {"isupper": "pyIsUpper", "islower": "pyIsLower", "isdigit": "pyIsDi
               "isalpha": "pyIsAlpha", "isspace": "pyIsSpace", "isalnum": "pyIsAlnum"}
 
 CPP_HELPERS = {
+    "repeat": (
+        "static string _repeat(const string& text, long long times) {\n"
+        "    // Python's str * int; no copies for a count below one.\n"
+        "    string out;\n"
+        "    for (long long i = 0; i < times; i++) out += text;\n"
+        "    return out;\n"
+        "}\n\n"
+    ),
     "split_on": (
         "static vector<string> _split_on(const string& s, const string& sep) {\n"
         "    // Python's str.split(sep): every field, empty ones included.\n"

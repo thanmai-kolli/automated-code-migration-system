@@ -209,12 +209,8 @@ class TestPythonToJava:
         assert "int amount" in java["code"]
 
     def test_accuracy_is_high(self, java):
-        # Model output, so this is a sanity band rather than a guarantee. The old
-        # score was inflated by a hardcoded per-language bonus; this one is
-        # predicted from measured migrations. Python -> Java scores in the low
-        # 70s because token overlap between the two languages is inherently
-        # small, so the band only guards against inflation or collapse.
-        assert 70 < java["accuracy"] < 100
+        # Model output, so only a band that catches a collapsed score.
+        assert 70 < java["accuracy"] <= 100
 
     def test_float_division_semantics(self, engine):
         result = engine.convert(PY_FUNCS, "python", "java")

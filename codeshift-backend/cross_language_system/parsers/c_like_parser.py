@@ -13,6 +13,7 @@ a trace.
 
 import re
 
+from cross_language_system.core import naming
 from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
 from cross_language_system.core.printf_format import tokens as format_tokens, value_count
@@ -84,6 +85,8 @@ TYPE_TO_IR = {
     "long": "long", "long long": "long", "long int": "long", "long long int": "long",
     "short int": "int", "unsigned int": "int", "signed int": "int",
     "unsigned long": "long", "unsigned long long": "long", "unsigned short": "int",
+    "unsigned long int": "long", "unsigned long long int": "long", "unsigned short int": "int",
+    "signed long": "long", "signed long long": "long", "short signed": "int",
     "float": "double", "double": "double", "long double": "double",
     "char": "char", "signed char": "char", "unsigned char": "char",
     "bool": "boolean",
@@ -111,7 +114,8 @@ SCALARS = {"int", "long", "double", "char", "boolean", "String"}
 
 # <limits.h> / <climits> constants, as plain values.
 LIMITS = {"INT_MAX": 2**31 - 1, "INT_MIN": -2**31, "LLONG_MAX": 2**63 - 1,
-          "LLONG_MIN": -2**63, "LONG_MAX": 2**31 - 1, "LONG_MIN": -2**31}
+          "LLONG_MIN": -2**63, "LONG_MAX": 2**31 - 1, "LONG_MIN": -2**31,
+          "EXIT_SUCCESS": 0, "EXIT_FAILURE": 1}
 
 
 class _Step:
@@ -180,6 +184,9 @@ class CLikeParser:
         # below) and the char arrays that hold C strings.
         self.var_types = {}
         self.c_strings = set()
+        # Arrays declared here with their elements, whose sizeof is the whole array.
+        self.local_arrays = set()
+        self.aliases = {}           # typedef names of scalar and pointer types
         # cout formatting state, tracked in program order within one function.
         self.stream = {"fixed": False, "precision": None, "left": False}
         self.block_depth = 0
@@ -261,6 +268,8 @@ class CLikeParser:
 
         program = Program(body)
         self._refuse_leftover_steps(program)
+        if any(isinstance(n, FunctionCall) and n.name == "__sizeof" for n in naming.walk(program)):
+            raise UnsupportedConstruct("sizeof other than an array length")
         if self.sticky_in and self.cout_in - self.sticky_in:
             # The stream state set in one function would also govern the others.
             raise UnsupportedConstruct("stream manipulators that would apply across functions")
@@ -342,6 +351,9 @@ class CLikeParser:
             while self.accept("::"):
                 parts.append(self.next()[1])
             name = "::".join(parts)
+            if name in self.aliases:
+                self.last_base_type = name
+                return self._decorators(self.aliases[name], constant)
         # Remembered so a declaration can tell std::string from char*.
         self.last_base_type = name.split("::")[-1]
 
@@ -501,10 +513,15 @@ class CLikeParser:
 
             declared = self._parse_type()
 
-            if declared is None or self.peek()[0] != "name":
+            if declared is None:
                 raise UnsupportedConstruct("unnamed or unusual function parameters")
-
-            name = self.next()[1]
+            if self.peek()[0] != "name" and self.value() in (",", ")"):
+                # void sort(int *, size_t); names nothing, as a prototype may.
+                name = f"_unnamed{len(params)}"
+            elif self.peek()[0] != "name":
+                raise UnsupportedConstruct("unnamed or unusual function parameters")
+            else:
+                name = self.next()[1]
             while self.accept("["):
                 while not self.at_end() and self.value() != "]":
                     self.index += 1
@@ -515,6 +532,8 @@ class CLikeParser:
             params.append(name)
             param_types[name] = declared
             self.var_types[name] = declared
+            # An array parameter is a pointer: sizeof gives the pointer's size.
+            self.local_arrays.discard(name)
 
         self.expect(")")
         return params, param_types
@@ -524,7 +543,13 @@ class CLikeParser:
 
         self.index += 1  # typedef
         if self.value() != "struct":
-            raise UnsupportedConstruct("typedef of a non-struct type")
+            # typedef unsigned long long ull;  names an existing type.
+            aliased = self._parse_type()
+            if aliased is None or self.peek()[0] != "name" or self.value(1) != ";":
+                raise UnsupportedConstruct("typedef of a non-struct type")
+            self.aliases[self.next()[1]] = aliased
+            self.expect(";")
+            return None
         self.index += 1
         if self.peek()[0] == "name" and self.value(1) == "{":
             self.index += 1
@@ -700,19 +725,23 @@ class CLikeParser:
         if token == "while":
             self.index += 1
             self.expect("(")
-            condition = self._parse_value()
+            assign, condition = self._split_condition(self._parse_expression())
             self.expect(")")
-            return WhileLoop(condition, self._parse_block())
+            body = self._parse_block()
+            if assign is None:
+                return WhileLoop(condition, body)
+            # while (n /= 10) body  ->  loop: n /= 10; stop when n is 0; body
+            return WhileLoop(Constant(True), [assign, IfStatement(UnaryOp("Not", condition), [Break()])] + body)
 
         if token == "do":
             self.index += 1
             body = self._parse_block()
             self.expect("while")
             self.expect("(")
-            condition = self._parse_value()
+            assign, condition = self._split_condition(self._parse_expression())
             self.expect(")")
             self.expect(";")
-            return lowering.do_while(body, condition)
+            return lowering.do_while(body + ([assign] if assign is not None else []), condition)
 
         if token == "for":
             return self._parse_for()
@@ -853,8 +882,16 @@ class CLikeParser:
                 element_type = f"List<{self._box(element_type)}>"
 
             value = None
+            braced = False
             if self.accept("="):
                 value = self._parse_initializer()
+                braced = isinstance(value, ArrayLiteral)
+                if braced and dimensions and all(
+                        isinstance(d, Constant) and isinstance(d.value, int) for d in dimensions):
+                    value, base = self._padded(value, dimensions, declared)
+                    element_type = base
+                    for _ in dimensions:
+                        element_type = f"List<{self._box(element_type)}>"
             elif self.value() == "(":
                 value = self._constructor_arguments(declared)
             elif dimensions and all(d is not None for d in dimensions):
@@ -873,7 +910,7 @@ class CLikeParser:
                 if not (declared == "char" and isinstance(value, Constant)):
                     raise UnsupportedConstruct("an array of unspecified size")
 
-            if declared == "char" and len(dimensions) == 1 and not isinstance(value, ArrayLiteral):
+            if declared == "char" and len(dimensions) == 1 and not braced and not isinstance(value, ArrayLiteral):
                 # A char buffer holds a C string: char word[100]; scanf("%s", word);
                 element_type = "String"
                 if isinstance(value, FunctionCall) and value.name == "range_array":
@@ -885,6 +922,10 @@ class CLikeParser:
                 raise UnsupportedConstruct("copying a struct by assignment")
 
             self.var_types[name] = element_type
+            if dimensions:
+                self.local_arrays.add(name)
+            else:
+                self.local_arrays.discard(name)
             declarations.append(Variable(name, element_type, value))
 
             if not self.accept(","):
@@ -893,6 +934,44 @@ class CLikeParser:
         self.expect(";")
         return declarations[0] if len(declarations) == 1 else declarations
 
+
+    @staticmethod
+    def _padded(value, dimensions, declared):
+        """C fills the rest of a partly initialised array with zeros: int a[5] = {1, 2};
+
+        Returns the full initial value and its element type; a char array
+        initialised with numbers holds small integers, not text.
+        """
+
+        def zero_constant(element):
+            return isinstance(element, Constant) and element.value in (0, 0.0) \
+                and not isinstance(element.value, bool) and not getattr(element, "is_char", False)
+
+        def flat(literal):
+            for element in literal.elements:
+                if isinstance(element, ArrayLiteral):
+                    yield from flat(element)
+                else:
+                    yield element
+
+        elements = list(flat(value))
+        numeric = all(isinstance(e, Constant) and isinstance(e.value, (int, float)) and not isinstance(e.value, bool)
+                      and not getattr(e, "is_char", False) for e in elements)
+        base = "int" if declared == "char" and numeric else declared
+        if numeric and all(zero_constant(e) for e in elements):
+            filled = FunctionCall("range_array", list(dimensions))
+            filled.element_type = base
+            return filled, base
+        size = dimensions[0].value
+        if len(dimensions) == 1 and len(value.elements) < size:
+            if size - len(value.elements) > 1000:
+                raise UnsupportedConstruct("a large, partly initialised array")
+            zero = Constant(0.0 if base in ("double", "float") else 0)
+            return ArrayLiteral(value.elements + [zero] * (size - len(value.elements))), base
+        if len(dimensions) > 1 and (len(value.elements) < size or any(
+                isinstance(row, ArrayLiteral) and len(row.elements) < dimensions[1].value for row in value.elements)):
+            raise UnsupportedConstruct("a partly initialised multi-dimensional array")
+        return value, base
     @staticmethod
     def _declared_container(declared):
         """declared itself when it is a std::string, vector or set type, else None."""
@@ -963,7 +1042,8 @@ class CLikeParser:
             if self.peek()[0] == "name" and self.value(1) == ":":
                 iterator = self.next()[1]
                 self.index += 1
-                iterable = self._parse_value()
+                # for (auto year : {1900, 2000}) walks a braced list.
+                iterable = self._parse_initializer() if self.value() == "{" else self._parse_value()
                 self.expect(")")
                 return ForLoop(iterator, iterable, self._parse_block())
         self.index = start
@@ -1163,6 +1243,17 @@ class CLikeParser:
         self.expect(")")
         self.expect(";")
 
+        if args and isinstance(args[0], TernaryOp) and all(
+                isinstance(branch, Constant) and isinstance(branch.value, str)
+                for branch in (args[0].if_true, args[0].if_false)):
+            # printf(last ? "%d\n" : "%d, ", i) chooses between two formats.
+            choice = args[0]
+            for branch in (choice.if_true, choice.if_false):
+                if value_count(branch.value) != len(args) - 1:
+                    raise UnsupportedConstruct("printf whose format does not match its arguments")
+            return IfStatement(choice.condition,
+                               [PrintStatement([FormatString(choice.if_true.value, args[1:])], end="")],
+                               [PrintStatement([FormatString(choice.if_false.value, args[1:])], end="")])
         if not args or not isinstance(args[0], Constant) or not isinstance(args[0].value, str):
             raise UnsupportedConstruct("printf with a computed format string")
         if value_count(args[0].value) != len(args) - 1:
@@ -1228,10 +1319,64 @@ class CLikeParser:
                 left = BooleanOp(left, logical, right)
             elif symbol in COMPARISON_NAMES:
                 left = BooleanOp(left, COMPARISON_NAMES[symbol], right)
+            elif symbol == "/" and self._array_length(left, right) is not None:
+                left = self._array_length(left, right)
             else:
                 left = BinaryOp(left, ARITHMETIC_NAMES[symbol], right)
 
         return left
+
+    @staticmethod
+    def _split_condition(condition):
+        """(assignment, value tested) for a condition that assigns, else (None, condition)."""
+
+        if isinstance(condition, Variable):
+            return condition, Identifier(condition.name)
+        if isinstance(condition, (Assignment, AugAssign)):
+            return condition, condition.target
+        return None, condition
+
+    def _parse_sizeof(self):
+        """sizeof x, sizeof(x), sizeof(*x), sizeof(x[0]) or sizeof(type), as a marker call.
+
+        Only the array-length idiom sizeof(a) / sizeof(a[0]) has a meaning in the
+        other languages; any other marker left after parsing is refused.
+        """
+
+        marker = FunctionCall("__sizeof", [])
+        if self.value() == "(" and self._looks_like_cast():
+            self.index += 1
+            marker.type_name = self._parse_type()
+            self.expect(")")
+            return marker
+        parenthesised = self.accept("(")
+        marker.deref = bool(self.accept("*"))
+        marker.args = [self._parse_postfix()]
+        if parenthesised:
+            self.expect(")")
+        return marker
+
+    def _array_length(self, numerator, denominator):
+        """The length of a local array for sizeof(a) / sizeof(a[0]) and its variants, else None."""
+
+        def marker(node):
+            return isinstance(node, FunctionCall) and node.name == "__sizeof"
+
+        if not (marker(numerator) and marker(denominator)) or getattr(numerator, "deref", False) \
+                or len(numerator.args) != 1 or not isinstance(numerator.args[0], Identifier):
+            return None
+        name = numerator.args[0].name
+        declared = self.var_types.get(name, "")
+        if name not in self.local_arrays or not declared.startswith("List<"):
+            return None
+        if denominator.args:
+            operand = denominator.args[0]
+            same = (getattr(denominator, "deref", False) and isinstance(operand, Identifier) and operand.name == name) \
+                or (isinstance(operand, IndexAccess) and isinstance(operand.obj, Identifier) and operand.obj.name == name)
+        else:
+            element = declared[5:-1]
+            same = self._box(getattr(denominator, "type_name", None) or "") == element
+        return MethodCall(Identifier(name), "size", []) if same else None
 
     def _parse_unary(self):
 
@@ -1267,7 +1412,8 @@ class CLikeParser:
             raise UnsupportedConstruct("pointer dereference and address-of")
 
         if self.value() == "sizeof":
-            raise UnsupportedConstruct("sizeof")
+            self.index += 1
+            return self._parse_sizeof()
 
         if self.value() == "(" and self._looks_like_cast():
             self.index += 1
@@ -1284,7 +1430,7 @@ class CLikeParser:
         kind, text = self.peek(1)
         if kind != "name":
             return False
-        if text in PRIMITIVE_WORDS or text in ("const", "string") or text in self.records:
+        if text in PRIMITIVE_WORDS or text in ("const", "string") or text in self.records or text in self.aliases:
             # (int) x, but not (n) * 2 for a variable n.
             position = 1
             while self.peek(position)[0] == "name" or self.value(position) in ("*", "&", "::"):

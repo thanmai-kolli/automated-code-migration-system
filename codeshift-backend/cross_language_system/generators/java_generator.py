@@ -1,4 +1,5 @@
 from cross_language_system.core import library
+from cross_language_system.core import naming
 from cross_language_system.core import precedence as prec
 from cross_language_system.core import printf_format
 from cross_language_system.core.errors import UnsupportedConstruct
@@ -111,6 +112,7 @@ class JavaGenerator:
 
     def generate(self, program):
 
+        naming.rename_reserved(program, "java")
         uses_input = self._program_uses_input(program)
         self.helpers = set()
         self.function_returns = {}
@@ -145,6 +147,12 @@ class JavaGenerator:
                     break
 
         self.symbol_table = SymbolTable()
+        fields = ""
+        if self.source_lang == "python":
+            for name, variable in library.module_globals(program).items():
+                java_type = self._java_type(variable.var_type)
+                fields += f"    static {java_type} {name};\n"
+                self.symbol_table.register_variable(name, java_type)
         for stmt in main_statements:
             main += self._generate_statement(stmt, indent=2)
 
@@ -166,6 +174,8 @@ class JavaGenerator:
         for name, helper in library.JAVA_HELPERS.items():
             if name in self.helpers:
                 code += helper
+        if fields:
+            code += fields + "\n"
         code += members + main + "}\n"
 
         return code
@@ -230,6 +240,7 @@ class JavaGenerator:
                 self.symbol_table.register_variable(field.name, self._java_type(field.field_type))
 
         signature = ", ".join(params)
+        self.current_return_type = None if func.is_constructor else self._java_type(func.return_type)
 
         if func.is_constructor and owner:
             code = f"{tab}public {owner.name}({signature}) {{\n"
@@ -241,6 +252,11 @@ class JavaGenerator:
 
         for stmt in func.body:
             code += self._generate_statement(stmt, indent + 1)
+
+        if func.name == "main" and self.source_lang in ("c", "c++") and self._java_type(func.return_type) == "int" \
+                and not (func.body and isinstance(func.body[-1], Return)):
+            # C's main returns 0 when it reaches its end; Java insists on a return.
+            code += f"{tab}    return 0;\n"
 
         code += f"{tab}}}\n\n"
 
@@ -339,7 +355,10 @@ class JavaGenerator:
             return f"{tab}continue;\n"
 
         if isinstance(stmt, Assignment):
-            return f"{tab}{self._store(stmt.target, self._generate_expr(stmt.value))};\n"
+            value = self._generate_expr(stmt.value)
+            if self._c_truth_into_int(stmt.value, self._type(stmt.target)):
+                value = f"({value} ? 1 : 0)"
+            return f"{tab}{self._store(stmt.target, value)};\n"
 
         if isinstance(stmt, AugAssign):
             return f"{tab}{self._aug_assign(stmt)};\n"
@@ -368,6 +387,8 @@ class JavaGenerator:
         if isinstance(stmt, Return):
             if stmt.value is None:
                 return f"{tab}return;\n"
+            if self._c_truth_into_int(stmt.value, getattr(self, "current_return_type", None)):
+                return f"{tab}return {self._generate_expr(stmt.value)} ? 1 : 0;\n"
             return f"{tab}return {self._generate_expr(stmt.value)};\n"
 
         if isinstance(stmt, IfStatement):
@@ -454,7 +475,15 @@ class JavaGenerator:
         if java_type == "char" and isinstance(value, Constant) and isinstance(value.value, str) \
                 and len(value.value) == 1:
             return self._char(value.value)
+        if self._c_truth_into_int(value, java_type):
+            return f"({self._generate_expr(value)} ? 1 : 0)"
         return self._generate_expr(value)
+
+    def _c_truth_into_int(self, value, slot_type):
+        """A C comparison or ! yields the int 0 or 1, a Java one a boolean."""
+
+        return self.source_lang in ("c", "c++") and self._type(value) == "boolean" \
+            and slot_type in ("int", "long", "Integer", "Long")
 
     def _for_loop(self, stmt, indent):
 
@@ -652,7 +681,7 @@ class JavaGenerator:
         code = self._generate_expr(expr)
         kind = self._type(expr) or ""
 
-        if kind in ("int", "long", "char", "double"):
+        if kind in ("int", "long", "char", "double", "Integer", "Long", "Character", "Double"):
             return f"{prec.operand(code, expr, 'NotEq', LANG)} != 0"
         if self.source_lang == "python" and (kind == "String" or kind.startswith(("List<", "Set<", "Map<"))):
             return f"!{self._receiver(expr)}.isEmpty()"
@@ -701,6 +730,11 @@ class JavaGenerator:
 
         if op not in OPERATORS:
             raise UnsupportedConstruct(f"operator {op} cannot be written as Java")
+
+        if op == "Mult" and "String" in (left_type, right_type) and self.source_lang == "python":
+            # Python's str * int; String.repeat gives "" for a count of zero.
+            text, count = (expr.left, expr.right) if left_type == "String" else (expr.right, expr.left)
+            return f"{self._receiver(text)}.repeat(Math.max(0, (int) ({self._generate_expr(count)})))"
 
         left = side(expr.left)
         right = side(expr.right, right=True)
@@ -805,8 +839,10 @@ class JavaGenerator:
 
         if expr.name == "sum" and len(expr.args) == 1:
             element = self._type(expr) or "int"
-            mapper = {"double": "mapToDouble(Double::doubleValue)",
-                      "long": "mapToLong(Long::longValue)"}.get(element, "mapToInt(Integer::intValue)")
+            if element == "double":
+                self.helpers.add("pySum")
+                return f"pySum({args})"
+            mapper = {"long": "mapToLong(Long::longValue)"}.get(element, "mapToInt(Integer::intValue)")
             return f"{self._receiver(expr.args[0])}.stream().{mapper}.sum()"
 
         if expr.name in ("sqrt", "pow", "abs", "max", "min") or expr.name in library.MATH_NAMES:
@@ -832,6 +868,8 @@ class JavaGenerator:
                 raise UnsupportedConstruct("multi-dimensional arrays in Java output")
             default = {"double": "0.0", "boolean": "false", "char": "'\\0'", "long": "0L",
                        "String": "null"}.get(getattr(expr, "element_type", "int"), "0")
+            if getattr(expr, "fill", None) is not None:
+                default = self._generate_expr(expr.fill)
             return f"new ArrayList<>(Collections.nCopies({args}, {default}))"
 
         return f"{expr.name}({args})"
@@ -969,12 +1007,20 @@ class JavaGenerator:
 
         if isinstance(expr, ArrayLiteral):
 
-            elements = ", ".join(self._generate_expr(e) for e in expr.elements)
-
             if not expr.elements:
                 return "new ArrayList<>()"
 
-            element_type = self._to_wrapper(self._java_type(self._type(expr.elements[0]) or "Object"))
+            kinds = {self._type(e) for e in expr.elements}
+            widest = next((k for k in ("double", "long") if k in kinds and kinds <= {"int", "long", "double"}), None)
+            if widest:
+                # Arrays.asList(1, 2L) has no single element type; widen as Python's numbers would.
+                cast = f"({widest}) "
+                elements = ", ".join(cast + prec.unary_operand(self._generate_expr(e), e, LANG)
+                                     if self._type(e) != widest else self._generate_expr(e) for e in expr.elements)
+                element_type = self._to_wrapper(widest)
+            else:
+                elements = ", ".join(self._generate_expr(e) for e in expr.elements)
+                element_type = self._to_wrapper(self._java_type(self._type(expr.elements[0]) or "Object"))
             return f"new ArrayList<{element_type}>(Arrays.asList({elements}))"
 
         if isinstance(expr, Input):

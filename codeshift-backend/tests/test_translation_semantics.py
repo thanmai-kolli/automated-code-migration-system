@@ -615,6 +615,168 @@ class TestExternalDefects:
 
 
 # ---------------------------------------------------------------------------
+# Idioms of programs written by others
+# ---------------------------------------------------------------------------
+
+PY_COMPREHENSIONS = """import sys
+xs = [3, 1, 4, 1, 5, 9, 2, 6]
+x = 100
+print(sum(x * x for x in xs), x)
+print(max(len(str(v)) for v in xs if v > 2), min(v for v in xs))
+print(''.join(str(d) for d in xs))
+print(any(v > 8 for v in xs), all(v > 0 for v in xs), any(v > 9 for v in xs))
+xs = [v + 1 for v in xs]
+print(xs, len([v for v in xs if v < 4]))
+print([a * b for a in range(1, 4) for b in range(1, 3)])
+print(sum(range(5)), list(range(3)))
+doors = [False] * 6
+for i in range(0, 6, 2):
+    doors[i] = not doors[i]
+print(doors, [0] * 3, ["-"] * 2)
+sys.stdout.write("no newline")
+print()
+print(*xs)
+print(*xs, sep=", ")
+"""
+
+C_IDIOMS = """#include <stdio.h>
+#include <stdlib.h>
+
+typedef unsigned long long ull;
+
+int digsum(int n);
+
+int digsum(int n) {
+    int sum = 0;
+    do { sum += n % 10; } while (n /= 10);
+    return sum;
+}
+
+void show(int *, int);
+
+void show(int *a, int n) {
+    for (int i = 0; i < n; i++)
+        printf(i == n - 1 ? "%d\\n" : "%d, ", a[i]);
+}
+
+int main() {
+    int pass = 3, from = 4;
+    int counts[5] = {0};
+    char open[4] = {0};
+    int primes[6] = {2, 3, 5};
+    ull big = 1;
+    counts[pass] += from;
+    open[1] = !open[1];
+    show(counts, sizeof(counts) / sizeof(counts[0]));
+    show(primes, sizeof primes / sizeof *primes);
+    printf("%d %d %d\\n", digsum(9875), open[1], open[2]);
+    for (int i = 0; i < 40; i++) big *= 2;
+    printf("%lld\\n", big);
+    return EXIT_SUCCESS;
+}
+"""
+
+C_FOR_CPP = """#include<stdio.h>
+#include<stdlib.h>
+
+char *repeat(char c, int n);
+
+int main(void)
+{
+    int printed = 0;
+    for (int i = 0; i < 3; i++)
+        printed += printf("%d ", i);
+    printf("\\n%d\\n", printed);
+    char *s = repeat('x', 3);
+    puts(s);
+    free(s);
+}
+
+char *repeat(char c, int n)
+{
+    char *out = malloc(n + 1);
+    for (int i = 0; i < n; i++) out[i] = c;
+    out[n] = '\\0';
+    return out;
+}
+"""
+
+JAVA_DOUBLES = """public class Main {
+    public static void main(String[] args) {
+        System.out.println(Math.pow(2, 30));
+        System.out.println(0.0001);
+        System.out.println(12345.5);
+        System.out.println("total " + 1e7);
+        double[] xs = {1.5, 2e8};
+        System.out.println(xs[1] / 4);
+    }
+}
+"""
+
+CPP_BRACED_LOOP = """#include <iostream>
+bool odd(int n) { return n % 2 == 1; }
+int main() {
+    for (auto year : {1900, 1994, 1996})
+        std::cout << year << (odd(year) ? " odd" : " even") << std::endl;
+}
+"""
+
+PY_SCRIPT = """WIDTH = 3
+digits = [7, 2, 9]
+
+def is_even(n):
+    return n == 0 or is_odd(n - 1)
+
+def is_odd(n):
+    return n != 0 and is_even(n - 1)
+
+def describe(n):
+    q, r = divmod(n, WIDTH)
+    return str(q) + "r" + str(r) + "-" * r
+
+def main():
+    for d in digits:
+        print(describe(d), is_even(d))
+    n, last = divmod(1234, 10)
+    print(n, last, int(10 ** 12) + 1)
+
+if __name__ == "__main__":
+    main()
+"""
+
+
+class TestExternalIdioms:
+
+    @pytest.mark.parametrize("target", directions("python", ["java", "c++"]))
+    def test_comprehensions_repetition_and_printing(self, target):
+        behaves_the_same(PY_COMPREHENSIONS, "python", target)
+
+    @pytest.mark.parametrize("target", directions("c", ["python", "java"]))
+    def test_c_idioms(self, target):
+        behaves_the_same(C_IDIOMS, "c", target)
+
+    @pytest.mark.parametrize("target", directions("c", ["c++"]))
+    def test_c_to_cpp_keeps_every_function(self, target):
+        behaves_the_same(C_FOR_CPP, "c", target)
+
+    @pytest.mark.parametrize("target", directions("java", ["python", "c++"]))
+    def test_java_doubles_print_as_java_does(self, target):
+        behaves_the_same(JAVA_DOUBLES, "java", target)
+
+    @pytest.mark.parametrize("target", directions("c++", ["python", "java"]))
+    def test_range_for_over_a_braced_list(self, target):
+        behaves_the_same(CPP_BRACED_LOOP, "c++", target)
+
+    @pytest.mark.parametrize("target", directions("python", ["java", "c++"]))
+    def test_module_script_with_globals_and_mutual_recursion(self, target):
+        behaves_the_same(PY_SCRIPT, "python", target)
+
+    def test_comprehension_variable_does_not_leak(self):
+        code = generate("x = 7\nprint(sum(x for x in range(3)), x)\n", "python", "java")
+        assert "int x = 7" in code and "_x" in code
+
+
+# ---------------------------------------------------------------------------
 # Refusals: what cannot be translated faithfully must say so
 # ---------------------------------------------------------------------------
 

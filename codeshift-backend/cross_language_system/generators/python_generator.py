@@ -1,6 +1,7 @@
 from cross_language_system.core import library
 from cross_language_system.core import precedence as prec
 from cross_language_system.core import printf_format
+from cross_language_system.core import naming
 from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
 from cross_language_system.core.symbol_table import SymbolTable
@@ -66,11 +67,38 @@ HELPERS = {
         "    # Java's String.valueOf: a list prints its elements' own text.\n"
         "    if isinstance(x, bool):\n"
         "        return 'true' if x else 'false'\n"
+        "    if isinstance(x, float):\n"
+        "        return _java_double(x)\n"
         "    if isinstance(x, list):\n"
         "        return '[' + ', '.join(_java_text(e) for e in x) + ']'\n"
         "    if isinstance(x, dict):\n"
         "        return '{' + ', '.join(_java_text(k) + '=' + _java_text(v) for k, v in x.items()) + '}'\n"
         "    return 'null' if x is None else str(x)\n"
+    ),
+    "_java_double": (
+        "def _java_double(x):\n"
+        "    # Java's Double.toString: plain from 1e-3 up to 1e7, scientific outside.\n"
+        "    x = float(x)\n"
+        "    if x != x:\n"
+        "        return 'NaN'\n"
+        "    if x in (float('inf'), float('-inf')):\n"
+        "        return 'Infinity' if x > 0 else '-Infinity'\n"
+        "    if x == 0 or 1e-3 <= abs(x) < 1e7:\n"
+        "        return repr(x)\n"
+        "    text = repr(abs(x))\n"
+        "    if 'e' in text:\n"
+        "        mantissa, exponent = text.split('e')\n"
+        "        digits, exponent = mantissa.replace('.', ''), int(exponent)\n"
+        "    else:\n"
+        "        whole, _, fraction = text.partition('.')\n"
+        "        digits = (whole + fraction).lstrip('0')\n"
+        "        if whole.strip('0'):\n"
+        "            exponent = len(whole.lstrip('0')) - 1\n"
+        "        else:\n"
+        "            exponent = -(len(fraction) - len(fraction.lstrip('0')) + 1)\n"
+        "    digits = digits.rstrip('0') or '0'\n"
+        "    sign = '-' if x < 0 else ''\n"
+        "    return sign + digits[0] + '.' + (digits[1:] or '0') + 'E' + str(exponent)\n"
     ),
 }
 
@@ -136,6 +164,7 @@ class PythonGenerator:
 
     def generate(self, program):
 
+        naming.rename_reserved(program, "python")
         self.symbol_table = SymbolTable()
         self.uses_tokens = False
         self.uses_math = False
@@ -193,7 +222,10 @@ class PythonGenerator:
             prelude += STREAM_READER
         if "_tmod" in self.helpers:
             self.helpers.add("_tdiv")
-        for name in ("_tdiv", "_tmod", "_char_at", "_round_half_up", "_round_away", "_java_split", "_java_text"):
+        if "_java_text" in self.helpers:
+            self.helpers.add("_java_double")
+        for name in ("_tdiv", "_tmod", "_char_at", "_round_half_up", "_round_away", "_java_split", "_java_double",
+                     "_java_text"):
             if name in self.helpers:
                 prelude += HELPERS[name] + "\n"
         if "_java_split" in self.helpers:
@@ -465,6 +497,10 @@ class PythonGenerator:
         if self.source_lang == "java" and kind == "boolean":
             return f"str({code}).lower()"
 
+        if self.source_lang == "java" and kind in ("double", "float"):
+            self.helpers.add("_java_double")
+            return f"_java_double({code})"
+
         if self.source_lang == "java" and kind and kind.startswith(("List<", "Map<")):
             self.helpers.add("_java_text")
             return f"_java_text({code})"
@@ -487,6 +523,9 @@ class PythonGenerator:
             return prec.operand(code, expr, "Add", LANG, right=True)
         if self.source_lang == "java" and kind == "boolean":
             return f"str({code}).lower()"
+        if self.source_lang == "java" and kind in ("double", "float"):
+            self.helpers.add("_java_double")
+            return f"_java_double({code})"
         if self.source_lang == "java" and kind and kind.startswith(("List<", "Map<")):
             self.helpers.add("_java_text")
             return f"_java_text({code})"
@@ -558,6 +597,8 @@ class PythonGenerator:
 
         if name == "range_array":
             element = ELEMENT_DEFAULTS.get(getattr(expr, "element_type", "int"), "0")
+            if getattr(expr, "fill", None) is not None:
+                element = self._generate_expr(expr.fill)
             if len(expr.args) == 1:
                 return f"[{element}] * {prec.operand(self._generate_expr(expr.args[0]), expr.args[0], 'Mult', LANG, right=True)}"
             if len(expr.args) == 2:

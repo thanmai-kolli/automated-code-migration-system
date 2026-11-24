@@ -615,9 +615,8 @@ class TypeAnnotator:
             return self.classes.get(owner, {}).get(expr.attribute, UNKNOWN)
 
         if isinstance(expr, UnaryOp):
-            if expr.operator == "Not":
-                return "boolean"
-            return self.infer(expr.operand, scope)
+            operand = self.infer(expr.operand, scope)
+            return "boolean" if expr.operator == "Not" else operand
 
         if isinstance(expr, BinaryOp):
             left = self.infer(expr.left, scope)
@@ -673,7 +672,10 @@ class TypeAnnotator:
             return "String"
 
         if isinstance(expr, TypeCast):
-            self.infer(expr.value, scope)
+            operand = self.infer(expr.value, scope)
+            if not self.c_semantics and self._normalize(expr.target_type) == "int" and operand == "long":
+                # Python's int() never narrows a value; a 32-bit cast would.
+                expr.target_type = "long"
             return self._normalize(expr.target_type)
 
         if isinstance(expr, Input):
@@ -723,6 +725,13 @@ class TypeAnnotator:
 
         if isinstance(expr, FunctionCall):
             arg_types = [self.infer(a, scope) for a in expr.args]
+            if expr.name == "range_array":
+                if getattr(expr, "fill", None) is not None:
+                    self.infer(expr.fill, scope)
+                result = self._boxed(getattr(expr, "element_type", None) or "int")
+                for _ in expr.args:
+                    result = f"List<{result}>"
+                return result
             library_call = getattr(expr, "library", False)
             if not library_call:
                 self._record_call(expr.name, arg_types)

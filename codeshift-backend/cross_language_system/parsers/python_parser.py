@@ -6,6 +6,7 @@ from cross_language_system.core import library
 from cross_language_system.core.errors import UnsupportedConstruct
 from cross_language_system.core.ir_nodes import *
 from cross_language_system.core.printf_format import python_spec_to_c
+from cross_language_system.parsers.python_hoist import hoist_comprehensions
 
 
 # math.<name>(...) calls every target can express.
@@ -25,10 +26,27 @@ class PythonParser:
         self._temp_index = 0
 
     def parse(self, code):
-        tree = ast.parse(code)
+        tree = hoist_comprehensions(ast.parse(code))
+        tree.body = self._without_main_guard(tree.body)
         # A module-level function shadows the builtin of the same name.
         self._defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
         return self._build_ir(tree)
+
+    @staticmethod
+    def _without_main_guard(statements):
+        """if __name__ == "__main__": body  runs body when the program runs, as top-level code does."""
+
+        out = []
+        for node in statements:
+            test = getattr(node, "test", None)
+            if (isinstance(node, ast.If) and not node.orelse and isinstance(test, ast.Compare)
+                    and isinstance(test.left, ast.Name) and test.left.id == "__name__"
+                    and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)
+                    and isinstance(test.comparators[0], ast.Constant) and test.comparators[0].value == "__main__"):
+                out.extend(node.body)
+            else:
+                out.append(node)
+        return out
 
     def _build_ir(self, tree):
 
@@ -289,6 +307,13 @@ class PythonParser:
                 if isinstance(node.value.func, ast.Name) and node.value.func.id == "print":
                     return self._handle_print(node.value)
 
+                # sys.stdout.write(s) prints s with nothing after it.
+                func = node.value.func
+                if isinstance(func, ast.Attribute) and func.attr == "write" and isinstance(func.value, ast.Attribute) \
+                        and func.value.attr == "stdout" and isinstance(func.value.value, ast.Name) \
+                        and func.value.value.id == "sys" and len(node.value.args) == 1 and not node.value.keywords:
+                    return PrintStatement([self._handle_expr(node.value.args[0])], end="", sep="")
+
                 if isinstance(node.value.func, ast.Attribute) and node.value.func.attr == "append":
                     return ListAppend(
                         self._handle_expr(node.value.func.value),
@@ -324,7 +349,39 @@ class PythonParser:
 
         return PrintStatement(args, end=options["end"], sep=options["sep"])
 
+    def _divmod_assign(self, node):
+        """q, r = divmod(a, b)  ->  both results from a and b as they were, then the assignments."""
+
+        value = node.value
+        if not (len(node.targets) == 1 and isinstance(node.targets[0], ast.Tuple) and len(node.targets[0].elts) == 2
+                and isinstance(value, ast.Call) and isinstance(value.func, ast.Name) and value.func.id == "divmod"
+                and len(value.args) == 2 and not value.keywords and "divmod" not in getattr(self, "_defined", ())):
+            return None
+        statements, operands = [], []
+        for argument in value.args:
+            operand = self._handle_expr(argument)
+            if not isinstance(argument, (ast.Name, ast.Constant)):
+                self._temp_index += 1
+                temp = f"_arg{self._temp_index}"
+                statements.append(Variable(temp, value=operand))
+                operand = Identifier(temp)
+            operands.append(operand)
+        self._temp_index += 1
+        quotient, remainder = f"_q{self._temp_index}", f"_r{self._temp_index}"
+        statements.append(Variable(quotient, value=BinaryOp(operands[0], "FloorDiv", operands[1])))
+        statements.append(Variable(remainder, value=BinaryOp(operands[0], "Mod", operands[1])))
+        for target, temp in zip(node.targets[0].elts, (quotient, remainder)):
+            assignment = self._assign_to(target, Identifier(temp))
+            if assignment is None:
+                _refuse(node, "this divmod assignment target")
+            statements.append(assignment)
+        return statements
+
     def _handle_assign(self, node):
+
+        divided = self._divmod_assign(node)
+        if divided is not None:
+            return divided
 
         # xs = list(map(int, input().split())) abbreviates a comprehension.
         comprehension = self._map_as_comprehension(node.value)
@@ -524,6 +581,23 @@ class PythonParser:
                 names |= PythonParser._names_written(element)
         return names
 
+    def _repetition(self, node):
+        """[x] * n with a constant x: n copies of an immutable value, which every target can build."""
+
+        if not isinstance(node.op, ast.Mult):
+            return None
+        for sequence, count in ((node.left, node.right), (node.right, node.left)):
+            if isinstance(sequence, ast.List) and len(sequence.elts) == 1 \
+                    and isinstance(sequence.elts[0], ast.Constant) and not isinstance(sequence.elts[0].value, bytes):
+                value = sequence.elts[0].value
+                filled = FunctionCall("range_array", [self._handle_expr(count)])
+                filled.element_type = {bool: "boolean", int: "int", float: "double", str: "String"}.get(
+                    type(value), "Object")
+                if value is not None and (isinstance(value, str) or value != 0 or isinstance(value, bool) and value):
+                    filled.fill = Constant(value)
+                return filled
+        return None
+
     def _desugar_comprehension(self, name, node):
         """[f(i) for i in xs if c]  ->  name = []; for i in xs: if c: name.append(f(i))"""
 
@@ -575,6 +649,8 @@ class PythonParser:
             return self._handle_call(node)
 
         if isinstance(node, ast.Constant):
+            if isinstance(node.value, bytes):
+                _refuse(node, "bytes literals")
             return Constant(node.value)
 
         if isinstance(node, ast.Name):
@@ -597,6 +673,10 @@ class PythonParser:
             ):
                 values = node.right.elts if isinstance(node.right, ast.Tuple) else [node.right]
                 return FormatString(node.left.value, [self._handle_expr(v) for v in values])
+
+            repeated = self._repetition(node)
+            if repeated is not None:
+                return repeated
 
             return BinaryOp(
                 self._handle_expr(node.left),
