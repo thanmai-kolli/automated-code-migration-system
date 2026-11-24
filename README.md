@@ -253,27 +253,36 @@ codeshift-frontend/src/       pages, components, services, utils, styles
 
 Each program the engine cannot translate faithfully is **refused** with a reason
 (`Cannot translate this program faithfully: ...`) rather than translated approximately.
-On 108 programs written by independent authors for [Rosetta Code](https://rosettacode.org)
-(324 translations, none seen during development), 29.6% were translated correctly, 44%
-were refused with an explanation and 1.9% were silently wrong. The main gaps:
+On 194 programs written by independent authors for [Rosetta Code](https://rosettacode.org)
+(582 translations, collected only after this version was frozen), 17.7% were translated
+correctly, 60.5% were refused with an explanation and 0.7% (4) were silently wrong. On an
+earlier set of 108 such programs, whose failures guided this version, 47.8% were correct.
+Many of the newer tasks exist to demonstrate lambdas, closures and generators. The main gaps:
 
 - **C as a target** has no growable list or string type: list growth, string building,
   string methods and iterating over a string from Python or Java, and C++ containers,
   `std::string`, classes and `<iomanip>`, are refused.
-- **Refused C and C++ constructs:** `sizeof`, pointer dereference, templates, chained
-  assignment, writes into `char` arrays, function-like macros, the stream manipulators
-  `scientific`, `setfill` and `boolalpha`, increments inside expressions and fall-through
-  `switch` cases.
-- **Refused Java and Python constructs:** lambdas and method references, enums, labels,
-  generator expressions and comprehensions inside expressions, slicing with a step other
-  than -1, keyword arguments, and iterating a dictionary or set into C++ (`std::map` and
-  `std::set` are ordered by key, Python's by insertion or hash).
-- **Unmapped library calls** (for example `sys.stdout.write`) and list repetition such as
-  `[False] * 100` still produce code that does not compile; Python's `None` used as a
-  missing integer is not modelled.
+- **Refused C and C++ constructs:** pointer dereference, templates, `sizeof` other than
+  an array length, chained assignment, writes into `char` arrays, function-like macros,
+  the stream manipulators `scientific`, `setfill` and `boolalpha`, increments inside
+  expressions and fall-through `switch` cases. The comma operator and several pointers
+  declared in one statement are not parsed.
+- **Refused Java and Python constructs:** lambdas, method references and anonymous
+  classes, generators (`yield`), nested functions, argument unpacking, enums, labels,
+  comprehensions in places Python evaluates conditionally (a `while` test, one branch of a
+  conditional expression), slicing with a step other than -1, keyword arguments, and
+  iterating a dictionary or set into C++ (`std::map` and `std::set` are ordered by key,
+  Python's by insertion or hash).
+- **Unmapped library calls** produce code that does not compile, or for Python targets
+  fails when it runs; Java method overloading is not resolved for Python targets, and
+  Python's `None` used as a missing integer is not modelled.
 - **Numeric formats:** C/C++ `unsigned` arithmetic wraps around, Python's and Java's
-  integers do not; Java prints doubles of 10^7 and more in scientific notation
-  (`1.0E7`), which the other targets do not reproduce.
+  integers do not; Python integers that grow by repeated addition stay 32-bit in Java and
+  C++; Java's scientific notation for doubles of 10^7 and more (`1.0E7`) is reproduced
+  in Python targets only.
+- **Known silent defects:** a C `main(int argc, char **argv)` is not the entry point of
+  the Java translation, and C++ programs with global arrays lose the call of `main` in
+  their Python translation.
 - Where a Python type cannot be inferred, Java falls back to `Object`; each such decision
   is reported in the semantic findings.
 - Single-file programs that use standard input and output only: no multi-file projects,
@@ -289,9 +298,11 @@ even) and `round(x, n)`, Java `Math.round`, C `round`; Python slicing, `s[::-1]`
 
 **Handled by lowering rather than mapping** — counting loops become `range` only when
 provably equivalent (otherwise a `while` loop), `switch` becomes an if/else chain,
-`printf`/`%`/f-string formatting goes through one format-string node, list
-comprehensions become loops with appends, tuple assignment goes through temporaries, and
-Python default arguments become Java overloads.
+`printf`/`%`/f-string formatting goes through one format-string node, comprehensions and
+generator expressions become loops (`any`/`all` stop early), list and string repetition,
+`divmod` and `print(*xs)` are expanded, tuple assignment goes through temporaries,
+Python default arguments become Java overloads, `sizeof(a)/sizeof(a[0])` becomes the array
+length, and identifiers the target reserves are renamed.
 
 ---
 
